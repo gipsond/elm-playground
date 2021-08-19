@@ -128,7 +128,7 @@ toPage url =
 
 view : Model -> Browser.Document Msg
 view model =
-    { title = "annaghi | elm-github-pages"
+    { title = "gipsond | elm-playground"
     , body =
         [ Html.text "The current URL is: "
         , Html.b [] [ Html.text (Url.toString model.url) ]
@@ -139,7 +139,7 @@ view model =
             , internalLinkView "/blog/1"
             , internalLinkView "/blog/2"
             ]
-        , Html.ul [] [ externalLinkView "https://github.com/annaghi/elm-github-pages" ]
+        , Html.ul [] [ externalLinkView "https://github.com/gipsond/elm-playground" ]
         , Html.hr [] []
         , case model.page of
             Home ->
