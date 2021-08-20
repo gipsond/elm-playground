@@ -7,8 +7,8 @@ repl-temp-*
 # VS Code settings
 .vscode
 
-# elm-make generated files
-local/**/main.js
+# build directory
+build
 
 # node packages
 node_modules

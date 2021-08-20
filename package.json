@@ -1,10 +1,16 @@
 {
   "scripts": {
-    "watch": "elm-live src/Main.elm --pushstate --port=8081 --dir=local --open -- --output=local/assets/main.js --debug",
-    "build": "npm run format && npm run optimize && cp -a local/assets docs",
-    "ps-build": "npm run format && (if exist docs\\assets rd /s /q docs\\assets) && npm run optimize && xcopy local\\assets docs\\assets /e /i",
+    "build": "npm run clean && npm run build-elm && cp -a html/pages/* build && npm run build-assets",
+    "build:local": "npm run clean && npm run build-elm && cp -a html/local/* build && npm run build-assets",
+    "build:local:windows": "npm run clean:windows && npm run build-elm && xcopy html\\local\\* build && npm run build-assets:windows",
+    "build-assets": "cp -a assets build",
+    "build-assets:windows": "xcopy assets build\\assets /e /i",
+    "build-elm": "elm make src/Main.elm --optimize --output=build/assets/main.js",
+    "clean": "rm -rf build",
+    "clean:windows": "if exist build rd /s /q build",
     "format": "elm-format --yes .",
-    "optimize": "elm make src/Main.elm --optimize --output=local/assets/main.js"
+    "run:windows": "npm run build:local:windows && npm run watch",
+    "watch": "elm-live src/Main.elm --pushstate --port=8081 --dir=build --open -- --output=build/assets/main.js --debug"
   },
   "devDependencies": {
     "elm": "^0.19.1-5",
