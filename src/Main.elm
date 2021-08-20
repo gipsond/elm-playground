@@ -1,14 +1,13 @@
 module Main exposing (main)
 
 import Base
+import Bootstrap.Navbar as Navbar
 import Browser
 import Browser.Navigation
 import Html
 import Html.Attributes
-import Page.About
-import Page.Blog0
-import Page.Blog1
-import Page.Blog2
+import Octicons
+import Page.Dice
 import Page.Home
 import Url
 import Url.Builder
@@ -37,25 +36,32 @@ main =
 
 type Page
     = Home
-    | About
-    | Blog Int
+    | Dice
     | NotFound
 
 
 type alias Model =
     { key : Browser.Navigation.Key
+    , navState : Navbar.State
     , url : Url.Url
     , page : Page
+    , diceModel : Page.Dice.Model
     }
 
 
 init : () -> Url.Url -> Browser.Navigation.Key -> ( Model, Cmd Msg )
 init flags url key =
+    let
+        ( navState, navCmd ) =
+            Navbar.initialState NavMsg
+    in
     ( { key = key
+      , navState = navState
       , url = url
       , page = toPage url
+      , diceModel = Page.Dice.init
       }
-    , Cmd.none
+    , navCmd
     )
 
 
@@ -66,6 +72,8 @@ init flags url key =
 type Msg
     = LinkClicked Browser.UrlRequest
     | UrlChanged Url.Url
+    | NavMsg Navbar.State
+    | DiceMsg Page.Dice.Msg
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -83,6 +91,20 @@ update msg model =
                     , Browser.Navigation.load href
                     )
 
+        DiceMsg diceMsg ->
+            let
+                ( diceModel, diceCmd ) =
+                    Page.Dice.update diceMsg model.diceModel
+            in
+            ( { model | diceModel = diceModel }
+            , Cmd.map DiceMsg diceCmd
+            )
+
+        NavMsg state ->
+            ( { model | navState = state }
+            , Cmd.none
+            )
+
         UrlChanged url ->
             ( { model | url = url, page = toPage url }
             , Cmd.none
@@ -94,8 +116,8 @@ update msg model =
 
 
 subscriptions : Model -> Sub Msg
-subscriptions _ =
-    Sub.none
+subscriptions model =
+    Navbar.subscriptions model.navState NavMsg
 
 
 
@@ -107,8 +129,7 @@ route =
     Url.Parser.oneOf
         [ Url.Parser.map Home Url.Parser.top
         , Url.Parser.map Home (Url.Parser.s Base.base)
-        , Url.Parser.map About (Url.Parser.s Base.base </> Url.Parser.s "about")
-        , Url.Parser.map Blog (Url.Parser.s Base.base </> Url.Parser.s "blog" </> Url.Parser.int)
+        , Url.Parser.map Dice (Url.Parser.s Base.base </> Url.Parser.s "dice")
         ]
 
 
@@ -130,67 +151,70 @@ view : Model -> Browser.Document Msg
 view model =
     { title = "gipsond | elm-playground"
     , body =
-        [ Html.text "The current URL is: "
-        , Html.b [] [ Html.text (Url.toString model.url) ]
-        , Html.ul []
-            [ internalLinkView "/"
-            , internalLinkView "/about"
-            , internalLinkView "/blog/0"
-            , internalLinkView "/blog/1"
-            , internalLinkView "/blog/2"
+        [ Html.div []
+            [ menu model
+            , Html.div [ Html.Attributes.class "container" ]
+                -- Bootstrap container
+                [ case model.page of
+                    Home ->
+                        Page.Home.view
+
+                    Dice ->
+                        Html.map DiceMsg (Page.Dice.view model.diceModel)
+
+                    NotFound ->
+                        notFoundView
+                ]
             ]
-        , Html.ul [] [ externalLinkView "https://github.com/gipsond/elm-playground" ]
-        , Html.hr [] []
-        , case model.page of
-            Home ->
-                Page.Home.view
-
-            About ->
-                Page.About.view
-
-            Blog number ->
-                blogView number
-
-            NotFound ->
-                notFoundView
         ]
     }
 
 
-internalLinkView : String -> Html.Html msg
-internalLinkView path =
-    Html.li []
-        [ Html.a
-            [ Html.Attributes.href <|
-                Url.Builder.absolute [ Base.base, String.dropLeft 1 path ] []
+menu : Model -> Html.Html Msg
+menu model =
+    Navbar.config NavMsg
+        |> Navbar.withAnimation
+        |> internalLink Navbar.brand "gipsond | Elm Playground" "/"
+        |> Navbar.items
+            [ Navbar.dropdown
+                { id = "apps"
+                , toggle = Navbar.dropdownToggle [] [ Html.text "Apps" ]
+                , items =
+                    List.map
+                        (uncurry <| internalLink <| Navbar.dropdownItem)
+                        [ ( "Dice", "/dice" )
+                        ]
+                }
+            , externalLink Navbar.itemLink "Source" "https://github.com/gipsond/elm-playground"
             ]
-            [ Html.text path ]
+        |> Navbar.view model.navState
+
+
+uncurry : (a -> b -> c) -> ( a, b ) -> c
+uncurry f ( a, b ) =
+    f a b
+
+
+type alias ElementConstructor msg element =
+    List (Html.Attribute msg) -> List (Html.Html msg) -> element
+
+
+internalLink : ElementConstructor msg link -> String -> String -> link
+internalLink linkConstructor label path =
+    linkConstructor
+        [ Html.Attributes.href <|
+            Url.Builder.absolute [ Base.base, String.dropLeft 1 path ] []
         ]
+        [ Html.text label ]
 
 
-externalLinkView : String -> Html.Html msg
-externalLinkView href =
-    Html.li []
-        [ Html.a
-            [ Html.Attributes.href href ]
-            [ Html.text href ]
+externalLink : ElementConstructor msg link -> String -> String -> link
+externalLink linkConstructor label href =
+    linkConstructor
+        [ Html.Attributes.href href ]
+        [ Octicons.linkExternal <| Octicons.defaultOptions
+        , Html.text (" " ++ label)
         ]
-
-
-blogView : Int -> Html.Html msg
-blogView number =
-    case number of
-        0 ->
-            Page.Blog0.view
-
-        1 ->
-            Page.Blog1.view
-
-        2 ->
-            Page.Blog2.view
-
-        _ ->
-            notFoundView
 
 
 notFoundView : Html.Html msg

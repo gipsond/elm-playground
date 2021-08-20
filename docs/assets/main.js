@@ -96,12 +96,6 @@ function _Utils_eq(x, y)
 
 function _Utils_eqHelp(x, y, depth, stack)
 {
-	if (depth > 100)
-	{
-		stack.push(_Utils_Tuple2(x,y));
-		return true;
-	}
-
 	if (x === y)
 	{
 		return true;
@@ -111,6 +105,12 @@ function _Utils_eqHelp(x, y, depth, stack)
 	{
 		typeof x === 'function' && _Debug_crash(5);
 		return false;
+	}
+
+	if (depth > 100)
+	{
+		stack.push(_Utils_Tuple2(x,y));
+		return true;
 	}
 
 	/**_UNUSED/
@@ -638,7 +638,7 @@ function _Debug_toAnsiString(ansi, value)
 		return _Debug_stringColor(ansi, '<' + value.byteLength + ' bytes>');
 	}
 
-	if (typeof File === 'function' && value instanceof File)
+	if (typeof File !== 'undefined' && value instanceof File)
 	{
 		return _Debug_internalColor(ansi, '<' + value.name + '>');
 	}
@@ -708,7 +708,7 @@ function _Debug_fadeColor(ansi, string)
 
 function _Debug_internalColor(ansi, string)
 {
-	return ansi ? '\x1b[94m' + string + '\x1b[0m' : string;
+	return ansi ? '\x1b[36m' + string + '\x1b[0m' : string;
 }
 
 function _Debug_toHexDigit(n)
@@ -784,11 +784,11 @@ function _Debug_crash_UNUSED(identifier, fact1, fact2, fact3, fact4)
 
 function _Debug_regionToString(region)
 {
-	if (region.N.z === region.S.z)
+	if (region.ch.ah === region.cz.ah)
 	{
-		return 'on line ' + region.N.z;
+		return 'on line ' + region.ch.ah;
 	}
-	return 'on lines ' + region.N.z + ' through ' + region.S.z;
+	return 'on lines ' + region.ch.ah + ' through ' + region.cz.ah;
 }
 
 
@@ -861,7 +861,7 @@ var _String_cons = F2(function(chr, str)
 function _String_uncons(string)
 {
 	var word = string.charCodeAt(0);
-	return word
+	return !isNaN(word)
 		? $elm$core$Maybe$Just(
 			0xD800 <= word && word <= 0xDBFF
 				? _Utils_Tuple2(_Utils_chr(string[0] + string[1]), string.slice(2))
@@ -1857,9 +1857,9 @@ var _Platform_worker = F4(function(impl, flagDecoder, debugMetadata, args)
 	return _Platform_initialize(
 		flagDecoder,
 		args,
-		impl.as,
-		impl.aA,
-		impl.ay,
+		impl.dq,
+		impl.dC,
+		impl.dz,
 		function() { return function() {} }
 	);
 });
@@ -1874,19 +1874,19 @@ function _Platform_initialize(flagDecoder, args, init, update, subscriptions, st
 	var result = A2(_Json_run, flagDecoder, _Json_wrap(args ? args['flags'] : undefined));
 	$elm$core$Result$isOk(result) || _Debug_crash(2 /**_UNUSED/, _Json_errorToString(result.a) /**/);
 	var managers = {};
-	result = init(result.a);
-	var model = result.a;
+	var initPair = init(result.a);
+	var model = initPair.a;
 	var stepper = stepperBuilder(sendToApp, model);
 	var ports = _Platform_setupEffects(managers, sendToApp);
 
 	function sendToApp(msg, viewMetadata)
 	{
-		result = A2(update, msg, model);
-		stepper(model = result.a, viewMetadata);
-		_Platform_dispatchEffects(managers, result.b, subscriptions(model));
+		var pair = A2(update, msg, model);
+		stepper(model = pair.a, viewMetadata);
+		_Platform_enqueueEffects(managers, pair.b, subscriptions(model));
 	}
 
-	_Platform_dispatchEffects(managers, result.b, subscriptions(model));
+	_Platform_enqueueEffects(managers, initPair.b, subscriptions(model));
 
 	return ports ? { ports: ports } : {};
 }
@@ -2044,6 +2044,51 @@ var _Platform_map = F2(function(tagger, bag)
 
 
 // PIPE BAGS INTO EFFECT MANAGERS
+//
+// Effects must be queued!
+//
+// Say your init contains a synchronous command, like Time.now or Time.here
+//
+//   - This will produce a batch of effects (FX_1)
+//   - The synchronous task triggers the subsequent `update` call
+//   - This will produce a batch of effects (FX_2)
+//
+// If we just start dispatching FX_2, subscriptions from FX_2 can be processed
+// before subscriptions from FX_1. No good! Earlier versions of this code had
+// this problem, leading to these reports:
+//
+//   https://github.com/elm/core/issues/980
+//   https://github.com/elm/core/pull/981
+//   https://github.com/elm/compiler/issues/1776
+//
+// The queue is necessary to avoid ordering issues for synchronous commands.
+
+
+// Why use true/false here? Why not just check the length of the queue?
+// The goal is to detect "are we currently dispatching effects?" If we
+// are, we need to bail and let the ongoing while loop handle things.
+//
+// Now say the queue has 1 element. When we dequeue the final element,
+// the queue will be empty, but we are still actively dispatching effects.
+// So you could get queue jumping in a really tricky category of cases.
+//
+var _Platform_effectsQueue = [];
+var _Platform_effectsActive = false;
+
+
+function _Platform_enqueueEffects(managers, cmdBag, subBag)
+{
+	_Platform_effectsQueue.push({ p: managers, q: cmdBag, r: subBag });
+
+	if (_Platform_effectsActive) return;
+
+	_Platform_effectsActive = true;
+	for (var fx; fx = _Platform_effectsQueue.shift(); )
+	{
+		_Platform_dispatchEffects(fx.p, fx.q, fx.r);
+	}
+	_Platform_effectsActive = false;
+}
 
 
 function _Platform_dispatchEffects(managers, cmdBag, subBag)
@@ -2081,8 +2126,8 @@ function _Platform_gatherEffects(isCmd, bag, effectsDict, taggers)
 
 		case 3:
 			_Platform_gatherEffects(isCmd, bag.o, effectsDict, {
-				p: bag.n,
-				q: taggers
+				s: bag.n,
+				t: taggers
 			});
 			return;
 	}
@@ -2093,9 +2138,9 @@ function _Platform_toEffect(isCmd, home, taggers, value)
 {
 	function applyTaggers(x)
 	{
-		for (var temp = taggers; temp; temp = temp.q)
+		for (var temp = taggers; temp; temp = temp.t)
 		{
-			x = temp.p(x);
+			x = temp.s(x);
 		}
 		return x;
 	}
@@ -2142,7 +2187,7 @@ function _Platform_outgoingPort(name, converter)
 	_Platform_checkPortName(name);
 	_Platform_effectManagers[name] = {
 		e: _Platform_outgoingPortMap,
-		r: converter,
+		u: converter,
 		a: _Platform_setupOutgoingPort
 	};
 	return _Platform_leaf(name);
@@ -2155,7 +2200,7 @@ var _Platform_outgoingPortMap = F2(function(tagger, value) { return value; });
 function _Platform_setupOutgoingPort(name)
 {
 	var subs = [];
-	var converter = _Platform_effectManagers[name].r;
+	var converter = _Platform_effectManagers[name].u;
 
 	// CREATE MANAGER
 
@@ -2212,7 +2257,7 @@ function _Platform_incomingPort(name, converter)
 	_Platform_checkPortName(name);
 	_Platform_effectManagers[name] = {
 		f: _Platform_incomingPortMap,
-		r: converter,
+		u: converter,
 		a: _Platform_setupIncomingPort
 	};
 	return _Platform_leaf(name);
@@ -2231,7 +2276,7 @@ var _Platform_incomingPortMap = F2(function(tagger, finalTagger)
 function _Platform_setupIncomingPort(name, sendToApp)
 {
 	var subs = _List_Nil;
-	var converter = _Platform_effectManagers[name].r;
+	var converter = _Platform_effectManagers[name].u;
 
 	// CREATE MANAGER
 
@@ -2659,9 +2704,9 @@ var _VirtualDom_mapEventTuple = F2(function(func, tuple)
 var _VirtualDom_mapEventRecord = F2(function(func, record)
 {
 	return {
-		k: func(record.k),
-		O: record.O,
-		L: record.L
+		w: func(record.w),
+		cj: record.cj,
+		cd: record.cd
 	}
 });
 
@@ -2929,11 +2974,11 @@ function _VirtualDom_makeCallback(eventNode, initialHandler)
 		// 3 = Custom
 
 		var value = result.a;
-		var message = !tag ? value : tag < 3 ? value.a : value.k;
-		var stopPropagation = tag == 1 ? value.b : tag == 3 && value.O;
+		var message = !tag ? value : tag < 3 ? value.a : value.w;
+		var stopPropagation = tag == 1 ? value.b : tag == 3 && value.cj;
 		var currentEventNode = (
 			stopPropagation && event.stopPropagation(),
-			(tag == 2 ? value.b : tag == 3 && value.L) && event.preventDefault(),
+			(tag == 2 ? value.b : tag == 3 && value.cd) && event.preventDefault(),
 			eventNode
 		);
 		var tagger;
@@ -3883,11 +3928,11 @@ var _Browser_element = _Debugger_element || F4(function(impl, flagDecoder, debug
 	return _Platform_initialize(
 		flagDecoder,
 		args,
-		impl.as,
-		impl.aA,
-		impl.ay,
+		impl.dq,
+		impl.dC,
+		impl.dz,
 		function(sendToApp, initialModel) {
-			var view = impl.aB;
+			var view = impl.dE;
 			/**/
 			var domNode = args['node'];
 			//*/
@@ -3919,12 +3964,12 @@ var _Browser_document = _Debugger_document || F4(function(impl, flagDecoder, deb
 	return _Platform_initialize(
 		flagDecoder,
 		args,
-		impl.as,
-		impl.aA,
-		impl.ay,
+		impl.dq,
+		impl.dC,
+		impl.dz,
 		function(sendToApp, initialModel) {
-			var divertHrefToApp = impl.M && impl.M(sendToApp)
-			var view = impl.aB;
+			var divertHrefToApp = impl.cg && impl.cg(sendToApp)
+			var view = impl.dE;
 			var title = _VirtualDom_doc.title;
 			var bodyNode = _VirtualDom_doc.body;
 			var currNode = _VirtualDom_virtualize(bodyNode);
@@ -3932,12 +3977,12 @@ var _Browser_document = _Debugger_document || F4(function(impl, flagDecoder, deb
 			{
 				_VirtualDom_divertHrefToApp = divertHrefToApp;
 				var doc = view(model);
-				var nextNode = _VirtualDom_node('body')(_List_Nil)(doc.am);
+				var nextNode = _VirtualDom_node('body')(_List_Nil)(doc.dd);
 				var patches = _VirtualDom_diff(currNode, nextNode);
 				bodyNode = _VirtualDom_applyPatches(bodyNode, currNode, patches, sendToApp);
 				currNode = nextNode;
 				_VirtualDom_divertHrefToApp = 0;
-				(title !== doc.az) && (_VirtualDom_doc.title = title = doc.az);
+				(title !== doc.dA) && (_VirtualDom_doc.title = title = doc.dA);
 			});
 		}
 	);
@@ -3993,12 +4038,12 @@ function _Browser_makeAnimator(model, draw)
 
 function _Browser_application(impl)
 {
-	var onUrlChange = impl.au;
-	var onUrlRequest = impl.av;
+	var onUrlChange = impl.du;
+	var onUrlRequest = impl.dv;
 	var key = function() { key.a(onUrlChange(_Browser_getUrl())); };
 
 	return _Browser_document({
-		M: function(sendToApp)
+		cg: function(sendToApp)
 		{
 			key.a = sendToApp;
 			_Browser_window.addEventListener('popstate', key);
@@ -4014,9 +4059,9 @@ function _Browser_application(impl)
 					var next = $elm$url$Url$fromString(href).a;
 					sendToApp(onUrlRequest(
 						(next
-							&& curr.ac === next.ac
-							&& curr.V === next.V
-							&& curr._.a === next._.a
+							&& curr.cU === next.cU
+							&& curr.cC === next.cC
+							&& curr.cQ.a === next.cQ.a
 						)
 							? $elm$browser$Browser$Internal(next)
 							: $elm$browser$Browser$External(href)
@@ -4024,13 +4069,13 @@ function _Browser_application(impl)
 				}
 			});
 		},
-		as: function(flags)
+		dq: function(flags)
 		{
-			return A3(impl.as, flags, _Browser_getUrl(), key);
+			return A3(impl.dq, flags, _Browser_getUrl(), key);
 		},
-		aB: impl.aB,
-		aA: impl.aA,
-		ay: impl.ay
+		dE: impl.dE,
+		dC: impl.dC,
+		dz: impl.dz
 	});
 }
 
@@ -4096,17 +4141,17 @@ var _Browser_decodeEvent = F2(function(decoder, event)
 function _Browser_visibilityInfo()
 {
 	return (typeof _VirtualDom_doc.hidden !== 'undefined')
-		? { aq: 'hidden', an: 'visibilitychange' }
+		? { dm: 'hidden', de: 'visibilitychange' }
 		:
 	(typeof _VirtualDom_doc.mozHidden !== 'undefined')
-		? { aq: 'mozHidden', an: 'mozvisibilitychange' }
+		? { dm: 'mozHidden', de: 'mozvisibilitychange' }
 		:
 	(typeof _VirtualDom_doc.msHidden !== 'undefined')
-		? { aq: 'msHidden', an: 'msvisibilitychange' }
+		? { dm: 'msHidden', de: 'msvisibilitychange' }
 		:
 	(typeof _VirtualDom_doc.webkitHidden !== 'undefined')
-		? { aq: 'webkitHidden', an: 'webkitvisibilitychange' }
-		: { aq: 'hidden', an: 'visibilitychange' };
+		? { dm: 'webkitHidden', de: 'webkitvisibilitychange' }
+		: { dm: 'hidden', de: 'visibilitychange' };
 }
 
 
@@ -4187,12 +4232,12 @@ var _Browser_call = F2(function(functionName, id)
 function _Browser_getViewport()
 {
 	return {
-		ag: _Browser_getScene(),
-		aj: {
-			G: _Browser_window.pageXOffset,
-			H: _Browser_window.pageYOffset,
-			x: _Browser_doc.documentElement.clientWidth,
-			s: _Browser_doc.documentElement.clientHeight
+		cZ: _Browser_getScene(),
+		c8: {
+			c9: _Browser_window.pageXOffset,
+			da: _Browser_window.pageYOffset,
+			co: _Browser_doc.documentElement.clientWidth,
+			b1: _Browser_doc.documentElement.clientHeight
 		}
 	};
 }
@@ -4202,8 +4247,8 @@ function _Browser_getScene()
 	var body = _Browser_doc.body;
 	var elem = _Browser_doc.documentElement;
 	return {
-		x: Math.max(body.scrollWidth, body.offsetWidth, elem.scrollWidth, elem.offsetWidth, elem.clientWidth),
-		s: Math.max(body.scrollHeight, body.offsetHeight, elem.scrollHeight, elem.offsetHeight, elem.clientHeight)
+		co: Math.max(body.scrollWidth, body.offsetWidth, elem.scrollWidth, elem.offsetWidth, elem.clientWidth),
+		b1: Math.max(body.scrollHeight, body.offsetHeight, elem.scrollHeight, elem.offsetHeight, elem.clientHeight)
 	};
 }
 
@@ -4226,15 +4271,15 @@ function _Browser_getViewportOf(id)
 	return _Browser_withNode(id, function(node)
 	{
 		return {
-			ag: {
-				x: node.scrollWidth,
-				s: node.scrollHeight
+			cZ: {
+				co: node.scrollWidth,
+				b1: node.scrollHeight
 			},
-			aj: {
-				G: node.scrollLeft,
-				H: node.scrollTop,
-				x: node.clientWidth,
-				s: node.clientHeight
+			c8: {
+				c9: node.scrollLeft,
+				da: node.scrollTop,
+				co: node.clientWidth,
+				b1: node.clientHeight
 			}
 		};
 	});
@@ -4264,18 +4309,18 @@ function _Browser_getElement(id)
 		var x = _Browser_window.pageXOffset;
 		var y = _Browser_window.pageYOffset;
 		return {
-			ag: _Browser_getScene(),
-			aj: {
-				G: x,
-				H: y,
-				x: _Browser_doc.documentElement.clientWidth,
-				s: _Browser_doc.documentElement.clientHeight
+			cZ: _Browser_getScene(),
+			c8: {
+				c9: x,
+				da: y,
+				co: _Browser_doc.documentElement.clientWidth,
+				b1: _Browser_doc.documentElement.clientHeight
 			},
-			ao: {
-				G: x + rect.left,
-				H: y + rect.top,
-				x: rect.width,
-				s: rect.height
+			dj: {
+				c9: x + rect.left,
+				da: y + rect.top,
+				co: rect.width,
+				b1: rect.height
 			}
 		};
 	});
@@ -4327,7 +4372,90 @@ function _Url_percentDecode(string)
 	{
 		return $elm$core$Maybe$Nothing;
 	}
-}var $author$project$Main$LinkClicked = function (a) {
+}
+
+
+var _Bitwise_and = F2(function(a, b)
+{
+	return a & b;
+});
+
+var _Bitwise_or = F2(function(a, b)
+{
+	return a | b;
+});
+
+var _Bitwise_xor = F2(function(a, b)
+{
+	return a ^ b;
+});
+
+function _Bitwise_complement(a)
+{
+	return ~a;
+};
+
+var _Bitwise_shiftLeftBy = F2(function(offset, a)
+{
+	return a << offset;
+});
+
+var _Bitwise_shiftRightBy = F2(function(offset, a)
+{
+	return a >> offset;
+});
+
+var _Bitwise_shiftRightZfBy = F2(function(offset, a)
+{
+	return a >>> offset;
+});
+
+
+
+function _Time_now(millisToPosix)
+{
+	return _Scheduler_binding(function(callback)
+	{
+		callback(_Scheduler_succeed(millisToPosix(Date.now())));
+	});
+}
+
+var _Time_setInterval = F2(function(interval, task)
+{
+	return _Scheduler_binding(function(callback)
+	{
+		var id = setInterval(function() { _Scheduler_rawSpawn(task); }, interval);
+		return function() { clearInterval(id); };
+	});
+});
+
+function _Time_here()
+{
+	return _Scheduler_binding(function(callback)
+	{
+		callback(_Scheduler_succeed(
+			A2($elm$time$Time$customZone, -(new Date().getTimezoneOffset()), _List_Nil)
+		));
+	});
+}
+
+
+function _Time_getZoneName()
+{
+	return _Scheduler_binding(function(callback)
+	{
+		try
+		{
+			var name = $elm$time$Time$Name(Intl.DateTimeFormat().resolvedOptions().timeZone);
+		}
+		catch (e)
+		{
+			var name = $elm$time$Time$Offset(new Date().getTimezoneOffset());
+		}
+		callback(_Scheduler_succeed(name));
+	});
+}
+var $author$project$Main$LinkClicked = function (a) {
 	return {$: 0, a: a};
 };
 var $author$project$Main$UrlChanged = function (a) {
@@ -4837,7 +4965,7 @@ var $elm$url$Url$Http = 0;
 var $elm$url$Url$Https = 1;
 var $elm$url$Url$Url = F6(
 	function (protocol, host, port_, path, query, fragment) {
-		return {U: fragment, V: host, Y: path, _: port_, ac: protocol, ad: query};
+		return {cB: fragment, cC: host, cO: path, cQ: port_, cU: protocol, cV: query};
 	});
 var $elm$core$String$contains = _String_contains;
 var $elm$core$String$length = _String_length;
@@ -5116,12 +5244,51 @@ var $elm$core$Task$perform = F2(
 			A2($elm$core$Task$map, toMessage, task));
 	});
 var $elm$browser$Browser$application = _Browser_application;
-var $elm$core$Platform$Cmd$batch = _Platform_batch;
-var $elm$core$Platform$Cmd$none = $elm$core$Platform$Cmd$batch(_List_Nil);
-var $author$project$Main$NotFound = {$: 3};
+var $author$project$Main$NavMsg = function (a) {
+	return {$: 2, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$Alert$Closed = 3;
+var $rundis$elm_bootstrap$Bootstrap$Alert$closed = 3;
+var $author$project$Page$Dice$init = {W: '', aa: '', bD: $elm$core$Maybe$Nothing, bE: $rundis$elm_bootstrap$Bootstrap$Alert$closed};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$Hidden = 0;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$State = $elm$core$Basics$identity;
+var $elm$core$Dict$RBEmpty_elm_builtin = {$: -2};
+var $elm$core$Dict$empty = $elm$core$Dict$RBEmpty_elm_builtin;
+var $elm$browser$Browser$Dom$getViewport = _Browser_withWindow(_Browser_getViewport);
+var $rundis$elm_bootstrap$Bootstrap$Navbar$mapState = F2(
+	function (mapper, _v0) {
+		var state = _v0;
+		return mapper(state);
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$initWindowSize = F2(
+	function (toMsg, state) {
+		return A2(
+			$elm$core$Task$perform,
+			function (vp) {
+				return toMsg(
+					A2(
+						$rundis$elm_bootstrap$Bootstrap$Navbar$mapState,
+						function (s) {
+							return _Utils_update(
+								s,
+								{
+									ax: $elm$core$Maybe$Just(vp.c8.co)
+								});
+						},
+						state));
+			},
+			$elm$browser$Browser$Dom$getViewport);
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$initialState = function (toMsg) {
+	var state = {C: $elm$core$Dict$empty, b1: $elm$core$Maybe$Nothing, f: 0, ax: $elm$core$Maybe$Nothing};
+	return _Utils_Tuple2(
+		state,
+		A2($rundis$elm_bootstrap$Bootstrap$Navbar$initWindowSize, toMsg, state));
+};
+var $author$project$Main$NotFound = 2;
 var $elm$url$Url$Parser$State = F5(
 	function (visited, unvisited, params, frag, value) {
-		return {n: frag, p: params, m: unvisited, i: value, q: visited};
+		return {D: frag, F: params, z: unvisited, dD: value, I: visited};
 	});
 var $elm$url$Url$Parser$getFirstMatch = function (states) {
 	getFirstMatch:
@@ -5131,12 +5298,12 @@ var $elm$url$Url$Parser$getFirstMatch = function (states) {
 		} else {
 			var state = states.a;
 			var rest = states.b;
-			var _v1 = state.m;
+			var _v1 = state.z;
 			if (!_v1.b) {
-				return $elm$core$Maybe$Just(state.i);
+				return $elm$core$Maybe$Just(state.dD);
 			} else {
 				if ((_v1.a === '') && (!_v1.b.b)) {
-					return $elm$core$Maybe$Just(state.i);
+					return $elm$core$Maybe$Just(state.dD);
 				} else {
 					var $temp$states = rest;
 					states = $temp$states;
@@ -5222,7 +5389,6 @@ var $elm$core$Dict$RBNode_elm_builtin = F5(
 	function (a, b, c, d, e) {
 		return {$: -1, a: a, b: b, c: c, d: d, e: e};
 	});
-var $elm$core$Dict$RBEmpty_elm_builtin = {$: -2};
 var $elm$core$Dict$Red = 0;
 var $elm$core$Dict$balance = F5(
 	function (color, key, value, left, right) {
@@ -5727,7 +5893,6 @@ var $elm$url$Url$Parser$addParam = F2(
 			return dict;
 		}
 	});
-var $elm$core$Dict$empty = $elm$core$Dict$RBEmpty_elm_builtin;
 var $elm$url$Url$Parser$prepareQuery = function (maybeQuery) {
 	if (maybeQuery.$ === 1) {
 		return $elm$core$Dict$empty;
@@ -5748,58 +5913,22 @@ var $elm$url$Url$Parser$parse = F2(
 				A5(
 					$elm$url$Url$Parser$State,
 					_List_Nil,
-					$elm$url$Url$Parser$preparePath(url.Y),
-					$elm$url$Url$Parser$prepareQuery(url.ad),
-					url.U,
+					$elm$url$Url$Parser$preparePath(url.cO),
+					$elm$url$Url$Parser$prepareQuery(url.cV),
+					url.cB,
 					$elm$core$Basics$identity)));
 	});
-var $author$project$Main$About = {$: 1};
-var $author$project$Main$Blog = function (a) {
-	return {$: 2, a: a};
-};
-var $author$project$Main$Home = {$: 0};
+var $author$project$Main$Dice = 1;
+var $author$project$Main$Home = 0;
 var $author$project$Base$base = 'elm-playground';
 var $elm$url$Url$Parser$Parser = $elm$core$Basics$identity;
-var $elm$url$Url$Parser$custom = F2(
-	function (tipe, stringToSomething) {
-		return function (_v0) {
-			var visited = _v0.q;
-			var unvisited = _v0.m;
-			var params = _v0.p;
-			var frag = _v0.n;
-			var value = _v0.i;
-			if (!unvisited.b) {
-				return _List_Nil;
-			} else {
-				var next = unvisited.a;
-				var rest = unvisited.b;
-				var _v2 = stringToSomething(next);
-				if (!_v2.$) {
-					var nextValue = _v2.a;
-					return _List_fromArray(
-						[
-							A5(
-							$elm$url$Url$Parser$State,
-							A2($elm$core$List$cons, next, visited),
-							rest,
-							params,
-							frag,
-							value(nextValue))
-						]);
-				} else {
-					return _List_Nil;
-				}
-			}
-		};
-	});
-var $elm$url$Url$Parser$int = A2($elm$url$Url$Parser$custom, 'NUMBER', $elm$core$String$toInt);
 var $elm$url$Url$Parser$mapState = F2(
 	function (func, _v0) {
-		var visited = _v0.q;
-		var unvisited = _v0.m;
-		var params = _v0.p;
-		var frag = _v0.n;
-		var value = _v0.i;
+		var visited = _v0.I;
+		var unvisited = _v0.z;
+		var params = _v0.F;
+		var frag = _v0.D;
+		var value = _v0.dD;
 		return A5(
 			$elm$url$Url$Parser$State,
 			visited,
@@ -5812,11 +5941,11 @@ var $elm$url$Url$Parser$map = F2(
 	function (subValue, _v0) {
 		var parseArg = _v0;
 		return function (_v1) {
-			var visited = _v1.q;
-			var unvisited = _v1.m;
-			var params = _v1.p;
-			var frag = _v1.n;
-			var value = _v1.i;
+			var visited = _v1.I;
+			var unvisited = _v1.z;
+			var params = _v1.F;
+			var frag = _v1.D;
+			var value = _v1.dD;
 			return A2(
 				$elm$core$List$map,
 				$elm$url$Url$Parser$mapState(value),
@@ -5853,11 +5982,11 @@ var $elm$url$Url$Parser$oneOf = function (parsers) {
 };
 var $elm$url$Url$Parser$s = function (str) {
 	return function (_v0) {
-		var visited = _v0.q;
-		var unvisited = _v0.m;
-		var params = _v0.p;
-		var frag = _v0.n;
-		var value = _v0.i;
+		var visited = _v0.I;
+		var unvisited = _v0.z;
+		var params = _v0.F;
+		var frag = _v0.D;
+		var value = _v0.dD;
 		if (!unvisited.b) {
 			return _List_Nil;
 		} else {
@@ -5894,28 +6023,18 @@ var $elm$url$Url$Parser$top = function (state) {
 var $author$project$Main$route = $elm$url$Url$Parser$oneOf(
 	_List_fromArray(
 		[
-			A2($elm$url$Url$Parser$map, $author$project$Main$Home, $elm$url$Url$Parser$top),
+			A2($elm$url$Url$Parser$map, 0, $elm$url$Url$Parser$top),
 			A2(
 			$elm$url$Url$Parser$map,
-			$author$project$Main$Home,
+			0,
 			$elm$url$Url$Parser$s($author$project$Base$base)),
 			A2(
 			$elm$url$Url$Parser$map,
-			$author$project$Main$About,
+			1,
 			A2(
 				$elm$url$Url$Parser$slash,
 				$elm$url$Url$Parser$s($author$project$Base$base),
-				$elm$url$Url$Parser$s('about'))),
-			A2(
-			$elm$url$Url$Parser$map,
-			$author$project$Main$Blog,
-			A2(
-				$elm$url$Url$Parser$slash,
-				$elm$url$Url$Parser$s($author$project$Base$base),
-				A2(
-					$elm$url$Url$Parser$slash,
-					$elm$url$Url$Parser$s('blog'),
-					$elm$url$Url$Parser$int)))
+				$elm$url$Url$Parser$s('dice')))
 		]));
 var $author$project$Main$toPage = function (url) {
 	var _v0 = A2($elm$url$Url$Parser$parse, $author$project$Main$route, url);
@@ -5923,25 +6042,616 @@ var $author$project$Main$toPage = function (url) {
 		var answer = _v0.a;
 		return answer;
 	} else {
-		return $author$project$Main$NotFound;
+		return 2;
 	}
 };
 var $author$project$Main$init = F3(
 	function (flags, url, key) {
+		var _v0 = $rundis$elm_bootstrap$Bootstrap$Navbar$initialState($author$project$Main$NavMsg);
+		var navState = _v0.a;
+		var navCmd = _v0.b;
 		return _Utils_Tuple2(
 			{
-				I: key,
-				E: $author$project$Main$toPage(url),
-				F: url
+				Z: $author$project$Page$Dice$init,
+				b5: key,
+				ak: navState,
+				bq: $author$project$Main$toPage(url),
+				cn: url
 			},
-			$elm$core$Platform$Cmd$none);
+			navCmd);
 	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$AnimatingDown = 2;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$AnimatingUp = 4;
 var $elm$core$Platform$Sub$batch = _Platform_batch;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$Closed = 2;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$ListenClicks = 1;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$Open = 0;
+var $elm$core$List$any = F2(
+	function (isOkay, list) {
+		any:
+		while (true) {
+			if (!list.b) {
+				return false;
+			} else {
+				var x = list.a;
+				var xs = list.b;
+				if (isOkay(x)) {
+					return true;
+				} else {
+					var $temp$isOkay = isOkay,
+						$temp$list = xs;
+					isOkay = $temp$isOkay;
+					list = $temp$list;
+					continue any;
+				}
+			}
+		}
+	});
+var $elm$core$Dict$map = F2(
+	function (func, dict) {
+		if (dict.$ === -2) {
+			return $elm$core$Dict$RBEmpty_elm_builtin;
+		} else {
+			var color = dict.a;
+			var key = dict.b;
+			var value = dict.c;
+			var left = dict.d;
+			var right = dict.e;
+			return A5(
+				$elm$core$Dict$RBNode_elm_builtin,
+				color,
+				key,
+				A2(func, key, value),
+				A2($elm$core$Dict$map, func, left),
+				A2($elm$core$Dict$map, func, right));
+		}
+	});
 var $elm$core$Platform$Sub$none = $elm$core$Platform$Sub$batch(_List_Nil);
-var $author$project$Main$subscriptions = function (_v0) {
-	return $elm$core$Platform$Sub$none;
+var $elm$browser$Browser$AnimationManager$Time = function (a) {
+	return {$: 0, a: a};
+};
+var $elm$browser$Browser$AnimationManager$State = F3(
+	function (subs, request, oldTime) {
+		return {b8: oldTime, cX: request, c0: subs};
+	});
+var $elm$browser$Browser$AnimationManager$init = $elm$core$Task$succeed(
+	A3($elm$browser$Browser$AnimationManager$State, _List_Nil, $elm$core$Maybe$Nothing, 0));
+var $elm$core$Process$kill = _Scheduler_kill;
+var $elm$browser$Browser$AnimationManager$now = _Browser_now(0);
+var $elm$browser$Browser$AnimationManager$rAF = _Browser_rAF(0);
+var $elm$core$Platform$sendToSelf = _Platform_sendToSelf;
+var $elm$core$Process$spawn = _Scheduler_spawn;
+var $elm$browser$Browser$AnimationManager$onEffects = F3(
+	function (router, subs, _v0) {
+		var request = _v0.cX;
+		var oldTime = _v0.b8;
+		var _v1 = _Utils_Tuple2(request, subs);
+		if (_v1.a.$ === 1) {
+			if (!_v1.b.b) {
+				var _v2 = _v1.a;
+				return $elm$browser$Browser$AnimationManager$init;
+			} else {
+				var _v4 = _v1.a;
+				return A2(
+					$elm$core$Task$andThen,
+					function (pid) {
+						return A2(
+							$elm$core$Task$andThen,
+							function (time) {
+								return $elm$core$Task$succeed(
+									A3(
+										$elm$browser$Browser$AnimationManager$State,
+										subs,
+										$elm$core$Maybe$Just(pid),
+										time));
+							},
+							$elm$browser$Browser$AnimationManager$now);
+					},
+					$elm$core$Process$spawn(
+						A2(
+							$elm$core$Task$andThen,
+							$elm$core$Platform$sendToSelf(router),
+							$elm$browser$Browser$AnimationManager$rAF)));
+			}
+		} else {
+			if (!_v1.b.b) {
+				var pid = _v1.a.a;
+				return A2(
+					$elm$core$Task$andThen,
+					function (_v3) {
+						return $elm$browser$Browser$AnimationManager$init;
+					},
+					$elm$core$Process$kill(pid));
+			} else {
+				return $elm$core$Task$succeed(
+					A3($elm$browser$Browser$AnimationManager$State, subs, request, oldTime));
+			}
+		}
+	});
+var $elm$time$Time$Posix = $elm$core$Basics$identity;
+var $elm$time$Time$millisToPosix = $elm$core$Basics$identity;
+var $elm$browser$Browser$AnimationManager$onSelfMsg = F3(
+	function (router, newTime, _v0) {
+		var subs = _v0.c0;
+		var oldTime = _v0.b8;
+		var send = function (sub) {
+			if (!sub.$) {
+				var tagger = sub.a;
+				return A2(
+					$elm$core$Platform$sendToApp,
+					router,
+					tagger(
+						$elm$time$Time$millisToPosix(newTime)));
+			} else {
+				var tagger = sub.a;
+				return A2(
+					$elm$core$Platform$sendToApp,
+					router,
+					tagger(newTime - oldTime));
+			}
+		};
+		return A2(
+			$elm$core$Task$andThen,
+			function (pid) {
+				return A2(
+					$elm$core$Task$andThen,
+					function (_v1) {
+						return $elm$core$Task$succeed(
+							A3(
+								$elm$browser$Browser$AnimationManager$State,
+								subs,
+								$elm$core$Maybe$Just(pid),
+								newTime));
+					},
+					$elm$core$Task$sequence(
+						A2($elm$core$List$map, send, subs)));
+			},
+			$elm$core$Process$spawn(
+				A2(
+					$elm$core$Task$andThen,
+					$elm$core$Platform$sendToSelf(router),
+					$elm$browser$Browser$AnimationManager$rAF)));
+	});
+var $elm$browser$Browser$AnimationManager$Delta = function (a) {
+	return {$: 1, a: a};
+};
+var $elm$core$Basics$composeL = F3(
+	function (g, f, x) {
+		return g(
+			f(x));
+	});
+var $elm$browser$Browser$AnimationManager$subMap = F2(
+	function (func, sub) {
+		if (!sub.$) {
+			var tagger = sub.a;
+			return $elm$browser$Browser$AnimationManager$Time(
+				A2($elm$core$Basics$composeL, func, tagger));
+		} else {
+			var tagger = sub.a;
+			return $elm$browser$Browser$AnimationManager$Delta(
+				A2($elm$core$Basics$composeL, func, tagger));
+		}
+	});
+_Platform_effectManagers['Browser.AnimationManager'] = _Platform_createManager($elm$browser$Browser$AnimationManager$init, $elm$browser$Browser$AnimationManager$onEffects, $elm$browser$Browser$AnimationManager$onSelfMsg, 0, $elm$browser$Browser$AnimationManager$subMap);
+var $elm$browser$Browser$AnimationManager$subscription = _Platform_leaf('Browser.AnimationManager');
+var $elm$browser$Browser$AnimationManager$onAnimationFrame = function (tagger) {
+	return $elm$browser$Browser$AnimationManager$subscription(
+		$elm$browser$Browser$AnimationManager$Time(tagger));
+};
+var $elm$browser$Browser$Events$onAnimationFrame = $elm$browser$Browser$AnimationManager$onAnimationFrame;
+var $elm$browser$Browser$Events$Document = 0;
+var $elm$browser$Browser$Events$MySub = F3(
+	function (a, b, c) {
+		return {$: 0, a: a, b: b, c: c};
+	});
+var $elm$browser$Browser$Events$State = F2(
+	function (subs, pids) {
+		return {cP: pids, c0: subs};
+	});
+var $elm$browser$Browser$Events$init = $elm$core$Task$succeed(
+	A2($elm$browser$Browser$Events$State, _List_Nil, $elm$core$Dict$empty));
+var $elm$browser$Browser$Events$nodeToKey = function (node) {
+	if (!node) {
+		return 'd_';
+	} else {
+		return 'w_';
+	}
+};
+var $elm$browser$Browser$Events$addKey = function (sub) {
+	var node = sub.a;
+	var name = sub.b;
+	return _Utils_Tuple2(
+		_Utils_ap(
+			$elm$browser$Browser$Events$nodeToKey(node),
+			name),
+		sub);
+};
+var $elm$core$Dict$fromList = function (assocs) {
+	return A3(
+		$elm$core$List$foldl,
+		F2(
+			function (_v0, dict) {
+				var key = _v0.a;
+				var value = _v0.b;
+				return A3($elm$core$Dict$insert, key, value, dict);
+			}),
+		$elm$core$Dict$empty,
+		assocs);
+};
+var $elm$core$Dict$foldl = F3(
+	function (func, acc, dict) {
+		foldl:
+		while (true) {
+			if (dict.$ === -2) {
+				return acc;
+			} else {
+				var key = dict.b;
+				var value = dict.c;
+				var left = dict.d;
+				var right = dict.e;
+				var $temp$func = func,
+					$temp$acc = A3(
+					func,
+					key,
+					value,
+					A3($elm$core$Dict$foldl, func, acc, left)),
+					$temp$dict = right;
+				func = $temp$func;
+				acc = $temp$acc;
+				dict = $temp$dict;
+				continue foldl;
+			}
+		}
+	});
+var $elm$core$Dict$merge = F6(
+	function (leftStep, bothStep, rightStep, leftDict, rightDict, initialResult) {
+		var stepState = F3(
+			function (rKey, rValue, _v0) {
+				stepState:
+				while (true) {
+					var list = _v0.a;
+					var result = _v0.b;
+					if (!list.b) {
+						return _Utils_Tuple2(
+							list,
+							A3(rightStep, rKey, rValue, result));
+					} else {
+						var _v2 = list.a;
+						var lKey = _v2.a;
+						var lValue = _v2.b;
+						var rest = list.b;
+						if (_Utils_cmp(lKey, rKey) < 0) {
+							var $temp$rKey = rKey,
+								$temp$rValue = rValue,
+								$temp$_v0 = _Utils_Tuple2(
+								rest,
+								A3(leftStep, lKey, lValue, result));
+							rKey = $temp$rKey;
+							rValue = $temp$rValue;
+							_v0 = $temp$_v0;
+							continue stepState;
+						} else {
+							if (_Utils_cmp(lKey, rKey) > 0) {
+								return _Utils_Tuple2(
+									list,
+									A3(rightStep, rKey, rValue, result));
+							} else {
+								return _Utils_Tuple2(
+									rest,
+									A4(bothStep, lKey, lValue, rValue, result));
+							}
+						}
+					}
+				}
+			});
+		var _v3 = A3(
+			$elm$core$Dict$foldl,
+			stepState,
+			_Utils_Tuple2(
+				$elm$core$Dict$toList(leftDict),
+				initialResult),
+			rightDict);
+		var leftovers = _v3.a;
+		var intermediateResult = _v3.b;
+		return A3(
+			$elm$core$List$foldl,
+			F2(
+				function (_v4, result) {
+					var k = _v4.a;
+					var v = _v4.b;
+					return A3(leftStep, k, v, result);
+				}),
+			intermediateResult,
+			leftovers);
+	});
+var $elm$browser$Browser$Events$Event = F2(
+	function (key, event) {
+		return {cA: event, b5: key};
+	});
+var $elm$browser$Browser$Events$spawn = F3(
+	function (router, key, _v0) {
+		var node = _v0.a;
+		var name = _v0.b;
+		var actualNode = function () {
+			if (!node) {
+				return _Browser_doc;
+			} else {
+				return _Browser_window;
+			}
+		}();
+		return A2(
+			$elm$core$Task$map,
+			function (value) {
+				return _Utils_Tuple2(key, value);
+			},
+			A3(
+				_Browser_on,
+				actualNode,
+				name,
+				function (event) {
+					return A2(
+						$elm$core$Platform$sendToSelf,
+						router,
+						A2($elm$browser$Browser$Events$Event, key, event));
+				}));
+	});
+var $elm$core$Dict$union = F2(
+	function (t1, t2) {
+		return A3($elm$core$Dict$foldl, $elm$core$Dict$insert, t2, t1);
+	});
+var $elm$browser$Browser$Events$onEffects = F3(
+	function (router, subs, state) {
+		var stepRight = F3(
+			function (key, sub, _v6) {
+				var deads = _v6.a;
+				var lives = _v6.b;
+				var news = _v6.c;
+				return _Utils_Tuple3(
+					deads,
+					lives,
+					A2(
+						$elm$core$List$cons,
+						A3($elm$browser$Browser$Events$spawn, router, key, sub),
+						news));
+			});
+		var stepLeft = F3(
+			function (_v4, pid, _v5) {
+				var deads = _v5.a;
+				var lives = _v5.b;
+				var news = _v5.c;
+				return _Utils_Tuple3(
+					A2($elm$core$List$cons, pid, deads),
+					lives,
+					news);
+			});
+		var stepBoth = F4(
+			function (key, pid, _v2, _v3) {
+				var deads = _v3.a;
+				var lives = _v3.b;
+				var news = _v3.c;
+				return _Utils_Tuple3(
+					deads,
+					A3($elm$core$Dict$insert, key, pid, lives),
+					news);
+			});
+		var newSubs = A2($elm$core$List$map, $elm$browser$Browser$Events$addKey, subs);
+		var _v0 = A6(
+			$elm$core$Dict$merge,
+			stepLeft,
+			stepBoth,
+			stepRight,
+			state.cP,
+			$elm$core$Dict$fromList(newSubs),
+			_Utils_Tuple3(_List_Nil, $elm$core$Dict$empty, _List_Nil));
+		var deadPids = _v0.a;
+		var livePids = _v0.b;
+		var makeNewPids = _v0.c;
+		return A2(
+			$elm$core$Task$andThen,
+			function (pids) {
+				return $elm$core$Task$succeed(
+					A2(
+						$elm$browser$Browser$Events$State,
+						newSubs,
+						A2(
+							$elm$core$Dict$union,
+							livePids,
+							$elm$core$Dict$fromList(pids))));
+			},
+			A2(
+				$elm$core$Task$andThen,
+				function (_v1) {
+					return $elm$core$Task$sequence(makeNewPids);
+				},
+				$elm$core$Task$sequence(
+					A2($elm$core$List$map, $elm$core$Process$kill, deadPids))));
+	});
+var $elm$core$List$maybeCons = F3(
+	function (f, mx, xs) {
+		var _v0 = f(mx);
+		if (!_v0.$) {
+			var x = _v0.a;
+			return A2($elm$core$List$cons, x, xs);
+		} else {
+			return xs;
+		}
+	});
+var $elm$core$List$filterMap = F2(
+	function (f, xs) {
+		return A3(
+			$elm$core$List$foldr,
+			$elm$core$List$maybeCons(f),
+			_List_Nil,
+			xs);
+	});
+var $elm$browser$Browser$Events$onSelfMsg = F3(
+	function (router, _v0, state) {
+		var key = _v0.b5;
+		var event = _v0.cA;
+		var toMessage = function (_v2) {
+			var subKey = _v2.a;
+			var _v3 = _v2.b;
+			var node = _v3.a;
+			var name = _v3.b;
+			var decoder = _v3.c;
+			return _Utils_eq(subKey, key) ? A2(_Browser_decodeEvent, decoder, event) : $elm$core$Maybe$Nothing;
+		};
+		var messages = A2($elm$core$List$filterMap, toMessage, state.c0);
+		return A2(
+			$elm$core$Task$andThen,
+			function (_v1) {
+				return $elm$core$Task$succeed(state);
+			},
+			$elm$core$Task$sequence(
+				A2(
+					$elm$core$List$map,
+					$elm$core$Platform$sendToApp(router),
+					messages)));
+	});
+var $elm$browser$Browser$Events$subMap = F2(
+	function (func, _v0) {
+		var node = _v0.a;
+		var name = _v0.b;
+		var decoder = _v0.c;
+		return A3(
+			$elm$browser$Browser$Events$MySub,
+			node,
+			name,
+			A2($elm$json$Json$Decode$map, func, decoder));
+	});
+_Platform_effectManagers['Browser.Events'] = _Platform_createManager($elm$browser$Browser$Events$init, $elm$browser$Browser$Events$onEffects, $elm$browser$Browser$Events$onSelfMsg, 0, $elm$browser$Browser$Events$subMap);
+var $elm$browser$Browser$Events$subscription = _Platform_leaf('Browser.Events');
+var $elm$browser$Browser$Events$on = F3(
+	function (node, name, decoder) {
+		return $elm$browser$Browser$Events$subscription(
+			A3($elm$browser$Browser$Events$MySub, node, name, decoder));
+	});
+var $elm$browser$Browser$Events$onClick = A2($elm$browser$Browser$Events$on, 0, 'click');
+var $rundis$elm_bootstrap$Bootstrap$Navbar$dropdownSubscriptions = F2(
+	function (state, toMsg) {
+		var dropdowns = state.C;
+		var updDropdowns = A2(
+			$elm$core$Dict$map,
+			F2(
+				function (_v2, status) {
+					switch (status) {
+						case 0:
+							return 1;
+						case 1:
+							return 2;
+						default:
+							return 2;
+					}
+				}),
+			dropdowns);
+		var updState = A2(
+			$rundis$elm_bootstrap$Bootstrap$Navbar$mapState,
+			function (s) {
+				return _Utils_update(
+					s,
+					{C: updDropdowns});
+			},
+			state);
+		var needsSub = function (s) {
+			return A2(
+				$elm$core$List$any,
+				function (_v1) {
+					var status = _v1.b;
+					return _Utils_eq(status, s);
+				},
+				$elm$core$Dict$toList(dropdowns));
+		};
+		return $elm$core$Platform$Sub$batch(
+			_List_fromArray(
+				[
+					needsSub(0) ? $elm$browser$Browser$Events$onAnimationFrame(
+					function (_v0) {
+						return toMsg(updState);
+					}) : $elm$core$Platform$Sub$none,
+					needsSub(1) ? $elm$browser$Browser$Events$onClick(
+					$elm$json$Json$Decode$succeed(
+						toMsg(updState))) : $elm$core$Platform$Sub$none
+				]));
+	});
+var $elm$browser$Browser$Events$Window = 1;
+var $elm$json$Json$Decode$field = _Json_decodeField;
+var $elm$json$Json$Decode$int = _Json_decodeInt;
+var $elm$browser$Browser$Events$onResize = function (func) {
+	return A3(
+		$elm$browser$Browser$Events$on,
+		1,
+		'resize',
+		A2(
+			$elm$json$Json$Decode$field,
+			'target',
+			A3(
+				$elm$json$Json$Decode$map2,
+				func,
+				A2($elm$json$Json$Decode$field, 'innerWidth', $elm$json$Json$Decode$int),
+				A2($elm$json$Json$Decode$field, 'innerHeight', $elm$json$Json$Decode$int))));
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$subscriptions = F2(
+	function (state, toMsg) {
+		var visibility = state.f;
+		var updState = function (v) {
+			return A2(
+				$rundis$elm_bootstrap$Bootstrap$Navbar$mapState,
+				function (s) {
+					return _Utils_update(
+						s,
+						{f: v});
+				},
+				state);
+		};
+		return $elm$core$Platform$Sub$batch(
+			_List_fromArray(
+				[
+					function () {
+					switch (visibility) {
+						case 1:
+							return $elm$browser$Browser$Events$onAnimationFrame(
+								function (_v1) {
+									return toMsg(
+										updState(2));
+								});
+						case 3:
+							return $elm$browser$Browser$Events$onAnimationFrame(
+								function (_v2) {
+									return toMsg(
+										updState(4));
+								});
+						default:
+							return $elm$core$Platform$Sub$none;
+					}
+				}(),
+					$elm$browser$Browser$Events$onResize(
+					F2(
+						function (x, _v3) {
+							return toMsg(
+								A2(
+									$rundis$elm_bootstrap$Bootstrap$Navbar$mapState,
+									function (s) {
+										return _Utils_update(
+											s,
+											{
+												ax: $elm$core$Maybe$Just(x)
+											});
+									},
+									state));
+						})),
+					A2($rundis$elm_bootstrap$Bootstrap$Navbar$dropdownSubscriptions, state, toMsg)
+				]));
+	});
+var $author$project$Main$subscriptions = function (model) {
+	return A2($rundis$elm_bootstrap$Bootstrap$Navbar$subscriptions, model.ak, $author$project$Main$NavMsg);
+};
+var $author$project$Main$DiceMsg = function (a) {
+	return {$: 3, a: a};
 };
 var $elm$browser$Browser$Navigation$load = _Browser_load;
+var $elm$core$Platform$Cmd$map = _Platform_map;
+var $elm$core$Platform$Cmd$batch = _Platform_batch;
+var $elm$core$Platform$Cmd$none = $elm$core$Platform$Cmd$batch(_List_Nil);
 var $elm$browser$Browser$Navigation$pushUrl = _Browser_pushUrl;
 var $elm$url$Url$addPort = F2(
 	function (maybePort, starter) {
@@ -5965,7 +6675,7 @@ var $elm$url$Url$addPrefixed = F3(
 	});
 var $elm$url$Url$toString = function (url) {
 	var http = function () {
-		var _v0 = url.ac;
+		var _v0 = url.cU;
 		if (!_v0) {
 			return 'http://';
 		} else {
@@ -5975,68 +6685,545 @@ var $elm$url$Url$toString = function (url) {
 	return A3(
 		$elm$url$Url$addPrefixed,
 		'#',
-		url.U,
+		url.cB,
 		A3(
 			$elm$url$Url$addPrefixed,
 			'?',
-			url.ad,
+			url.cV,
 			_Utils_ap(
 				A2(
 					$elm$url$Url$addPort,
-					url._,
-					_Utils_ap(http, url.V)),
-				url.Y)));
+					url.cQ,
+					_Utils_ap(http, url.cC)),
+				url.cO)));
 };
-var $author$project$Main$update = F2(
-	function (msg, model) {
-		if (!msg.$) {
-			var urlRequest = msg.a;
-			if (!urlRequest.$) {
-				var url = urlRequest.a;
-				return _Utils_Tuple2(
-					model,
-					A2(
-						$elm$browser$Browser$Navigation$pushUrl,
-						model.I,
-						$elm$url$Url$toString(url)));
-			} else {
-				var href = urlRequest.a;
-				return _Utils_Tuple2(
-					model,
-					$elm$browser$Browser$Navigation$load(href));
-			}
+var $johnathanbostrom$elm_dice$Dice$DX = function (a) {
+	return {$: 7, a: a};
+};
+var $author$project$Page$Dice$GotRollResult = function (a) {
+	return {$: 3, a: a};
+};
+var $elm$random$Random$Generate = $elm$core$Basics$identity;
+var $elm$random$Random$Seed = F2(
+	function (a, b) {
+		return {$: 0, a: a, b: b};
+	});
+var $elm$core$Bitwise$shiftRightZfBy = _Bitwise_shiftRightZfBy;
+var $elm$random$Random$next = function (_v0) {
+	var state0 = _v0.a;
+	var incr = _v0.b;
+	return A2($elm$random$Random$Seed, ((state0 * 1664525) + incr) >>> 0, incr);
+};
+var $elm$random$Random$initialSeed = function (x) {
+	var _v0 = $elm$random$Random$next(
+		A2($elm$random$Random$Seed, 0, 1013904223));
+	var state1 = _v0.a;
+	var incr = _v0.b;
+	var state2 = (state1 + x) >>> 0;
+	return $elm$random$Random$next(
+		A2($elm$random$Random$Seed, state2, incr));
+};
+var $elm$time$Time$Name = function (a) {
+	return {$: 0, a: a};
+};
+var $elm$time$Time$Offset = function (a) {
+	return {$: 1, a: a};
+};
+var $elm$time$Time$Zone = F2(
+	function (a, b) {
+		return {$: 0, a: a, b: b};
+	});
+var $elm$time$Time$customZone = $elm$time$Time$Zone;
+var $elm$time$Time$now = _Time_now($elm$time$Time$millisToPosix);
+var $elm$time$Time$posixToMillis = function (_v0) {
+	var millis = _v0;
+	return millis;
+};
+var $elm$random$Random$init = A2(
+	$elm$core$Task$andThen,
+	function (time) {
+		return $elm$core$Task$succeed(
+			$elm$random$Random$initialSeed(
+				$elm$time$Time$posixToMillis(time)));
+	},
+	$elm$time$Time$now);
+var $elm$random$Random$step = F2(
+	function (_v0, seed) {
+		var generator = _v0;
+		return generator(seed);
+	});
+var $elm$random$Random$onEffects = F3(
+	function (router, commands, seed) {
+		if (!commands.b) {
+			return $elm$core$Task$succeed(seed);
 		} else {
-			var url = msg.a;
-			return _Utils_Tuple2(
-				_Utils_update(
-					model,
-					{
-						E: $author$project$Main$toPage(url),
-						F: url
-					}),
-				$elm$core$Platform$Cmd$none);
+			var generator = commands.a;
+			var rest = commands.b;
+			var _v1 = A2($elm$random$Random$step, generator, seed);
+			var value = _v1.a;
+			var newSeed = _v1.b;
+			return A2(
+				$elm$core$Task$andThen,
+				function (_v2) {
+					return A3($elm$random$Random$onEffects, router, rest, newSeed);
+				},
+				A2($elm$core$Platform$sendToApp, router, value));
 		}
 	});
-var $elm$html$Html$b = _VirtualDom_node('b');
-var $elm$virtual_dom$VirtualDom$text = _VirtualDom_text;
-var $elm$html$Html$text = $elm$virtual_dom$VirtualDom$text;
-var $author$project$Main$notFoundView = $elm$html$Html$text('Not found');
-var $author$project$Page$Blog0$view = $elm$html$Html$text('Blog 0 view');
-var $author$project$Page$Blog1$view = $elm$html$Html$text('Blog 1 view');
-var $author$project$Page$Blog2$view = $elm$html$Html$text('Blog 2 view');
-var $author$project$Main$blogView = function (number) {
-	switch (number) {
+var $elm$random$Random$onSelfMsg = F3(
+	function (_v0, _v1, seed) {
+		return $elm$core$Task$succeed(seed);
+	});
+var $elm$random$Random$Generator = $elm$core$Basics$identity;
+var $elm$random$Random$map = F2(
+	function (func, _v0) {
+		var genA = _v0;
+		return function (seed0) {
+			var _v1 = genA(seed0);
+			var a = _v1.a;
+			var seed1 = _v1.b;
+			return _Utils_Tuple2(
+				func(a),
+				seed1);
+		};
+	});
+var $elm$random$Random$cmdMap = F2(
+	function (func, _v0) {
+		var generator = _v0;
+		return A2($elm$random$Random$map, func, generator);
+	});
+_Platform_effectManagers['Random'] = _Platform_createManager($elm$random$Random$init, $elm$random$Random$onEffects, $elm$random$Random$onSelfMsg, $elm$random$Random$cmdMap);
+var $elm$random$Random$command = _Platform_leaf('Random');
+var $elm$random$Random$generate = F2(
+	function (tagger, generator) {
+		return $elm$random$Random$command(
+			A2($elm$random$Random$map, tagger, generator));
+	});
+var $johnathanbostrom$elm_dice$Dice$RollResult = F3(
+	function (description, value, children) {
+		return {aP: children, dh: description, dD: value};
+	});
+var $johnathanbostrom$elm_dice$Dice$RollResults = function (a) {
+	return {$: 1, a: a};
+};
+var $johnathanbostrom$elm_dice$Dice$manyDieResult = F3(
+	function (desc, val, rolls) {
+		return A3(
+			$johnathanbostrom$elm_dice$Dice$RollResult,
+			desc,
+			val,
+			$johnathanbostrom$elm_dice$Dice$RollResults(rolls));
+	});
+var $johnathanbostrom$elm_dice$Dice$combineResults = F2(
+	function (description, rollResults) {
+		var val = A3(
+			$elm$core$List$foldl,
+			$elm$core$Basics$add,
+			0,
+			A2(
+				$elm$core$List$map,
+				function ($) {
+					return $.dD;
+				},
+				rollResults));
+		return A3($johnathanbostrom$elm_dice$Dice$manyDieResult, description, val, rollResults);
+	});
+var $elm$random$Random$constant = function (value) {
+	return function (seed) {
+		return _Utils_Tuple2(value, seed);
+	};
+};
+var $johnathanbostrom$elm_dice$Dice$Empty = {$: 0};
+var $johnathanbostrom$elm_dice$Dice$oneDieResult = F2(
+	function (desc, val) {
+		return A3($johnathanbostrom$elm_dice$Dice$RollResult, desc, val, $johnathanbostrom$elm_dice$Dice$Empty);
+	});
+var $johnathanbostrom$elm_dice$Dice$constant = F2(
+	function (description, val) {
+		return A2(
+			$elm$random$Random$map,
+			$johnathanbostrom$elm_dice$Dice$oneDieResult(description),
+			$elm$random$Random$constant(val));
+	});
+var $johnathanbostrom$elm_dice$Dice$dieName = function (dieType) {
+	switch (dieType.$) {
 		case 0:
-			return $author$project$Page$Blog0$view;
+			return 'D4';
 		case 1:
-			return $author$project$Page$Blog1$view;
+			return 'D6';
 		case 2:
-			return $author$project$Page$Blog2$view;
+			return 'D8';
+		case 3:
+			return 'D10';
+		case 4:
+			return 'D12';
+		case 5:
+			return 'D20';
+		case 6:
+			return 'D100';
+		case 7:
+			var sides = dieType.a;
+			return 'D' + $elm$core$String$fromInt(sides);
+		case 8:
+			var description = dieType.a;
+			return description;
+		case 11:
+			var description = dieType.a;
+			return description;
+		case 9:
+			var description = dieType.a;
+			return description;
 		default:
-			return $author$project$Main$notFoundView;
+			var description = dieType.a;
+			return description;
 	}
 };
-var $elm$html$Html$a = _VirtualDom_node('a');
+var $elm$random$Random$listHelp = F4(
+	function (revList, n, gen, seed) {
+		listHelp:
+		while (true) {
+			if (n < 1) {
+				return _Utils_Tuple2(revList, seed);
+			} else {
+				var _v0 = gen(seed);
+				var value = _v0.a;
+				var newSeed = _v0.b;
+				var $temp$revList = A2($elm$core$List$cons, value, revList),
+					$temp$n = n - 1,
+					$temp$gen = gen,
+					$temp$seed = newSeed;
+				revList = $temp$revList;
+				n = $temp$n;
+				gen = $temp$gen;
+				seed = $temp$seed;
+				continue listHelp;
+			}
+		}
+	});
+var $elm$random$Random$list = F2(
+	function (n, _v0) {
+		var gen = _v0;
+		return function (seed) {
+			return A4($elm$random$Random$listHelp, _List_Nil, n, gen, seed);
+		};
+	});
+var $johnathanbostrom$elm_dice$Dice$dCompound = F2(
+	function (desc, generator) {
+		return A2(
+			$elm$random$Random$map,
+			function (r) {
+				return _Utils_update(
+					r,
+					{dh: desc});
+			},
+			generator);
+	});
+var $johnathanbostrom$elm_dice$Dice$toRollResultGenerator = F2(
+	function (description, generator) {
+		return A2(
+			$elm$random$Random$map,
+			$johnathanbostrom$elm_dice$Dice$oneDieResult(description),
+			generator);
+	});
+var $elm$random$Random$addOne = function (value) {
+	return _Utils_Tuple2(1, value);
+};
+var $elm$core$Basics$negate = function (n) {
+	return -n;
+};
+var $elm$core$Basics$abs = function (n) {
+	return (n < 0) ? (-n) : n;
+};
+var $elm$core$Bitwise$and = _Bitwise_and;
+var $elm$core$Bitwise$xor = _Bitwise_xor;
+var $elm$random$Random$peel = function (_v0) {
+	var state = _v0.a;
+	var word = (state ^ (state >>> ((state >>> 28) + 4))) * 277803737;
+	return ((word >>> 22) ^ word) >>> 0;
+};
+var $elm$random$Random$float = F2(
+	function (a, b) {
+		return function (seed0) {
+			var seed1 = $elm$random$Random$next(seed0);
+			var range = $elm$core$Basics$abs(b - a);
+			var n1 = $elm$random$Random$peel(seed1);
+			var n0 = $elm$random$Random$peel(seed0);
+			var lo = (134217727 & n1) * 1.0;
+			var hi = (67108863 & n0) * 1.0;
+			var val = ((hi * 134217728.0) + lo) / 9007199254740992.0;
+			var scaled = (val * range) + a;
+			return _Utils_Tuple2(
+				scaled,
+				$elm$random$Random$next(seed1));
+		};
+	});
+var $elm$random$Random$getByWeight = F3(
+	function (_v0, others, countdown) {
+		getByWeight:
+		while (true) {
+			var weight = _v0.a;
+			var value = _v0.b;
+			if (!others.b) {
+				return value;
+			} else {
+				var second = others.a;
+				var otherOthers = others.b;
+				if (_Utils_cmp(
+					countdown,
+					$elm$core$Basics$abs(weight)) < 1) {
+					return value;
+				} else {
+					var $temp$_v0 = second,
+						$temp$others = otherOthers,
+						$temp$countdown = countdown - $elm$core$Basics$abs(weight);
+					_v0 = $temp$_v0;
+					others = $temp$others;
+					countdown = $temp$countdown;
+					continue getByWeight;
+				}
+			}
+		}
+	});
+var $elm$core$List$sum = function (numbers) {
+	return A3($elm$core$List$foldl, $elm$core$Basics$add, 0, numbers);
+};
+var $elm$random$Random$weighted = F2(
+	function (first, others) {
+		var normalize = function (_v0) {
+			var weight = _v0.a;
+			return $elm$core$Basics$abs(weight);
+		};
+		var total = normalize(first) + $elm$core$List$sum(
+			A2($elm$core$List$map, normalize, others));
+		return A2(
+			$elm$random$Random$map,
+			A2($elm$random$Random$getByWeight, first, others),
+			A2($elm$random$Random$float, 0, total));
+	});
+var $elm$random$Random$uniform = F2(
+	function (value, valueList) {
+		return A2(
+			$elm$random$Random$weighted,
+			$elm$random$Random$addOne(value),
+			A2($elm$core$List$map, $elm$random$Random$addOne, valueList));
+	});
+var $johnathanbostrom$elm_dice$Dice$dCustom = F2(
+	function (description, sides) {
+		if (!sides.b) {
+			return A2($johnathanbostrom$elm_dice$Dice$constant, description, 0);
+		} else {
+			var x = sides.a;
+			var xs = sides.b;
+			return A2(
+				$johnathanbostrom$elm_dice$Dice$toRollResultGenerator,
+				description,
+				A2($elm$random$Random$uniform, x, xs));
+		}
+	});
+var $johnathanbostrom$elm_dice$Dice$dWeighted = F2(
+	function (description, sides) {
+		if (!sides.b) {
+			return A2($johnathanbostrom$elm_dice$Dice$constant, description, 0);
+		} else {
+			var x = sides.a;
+			var xs = sides.b;
+			return A2(
+				$johnathanbostrom$elm_dice$Dice$toRollResultGenerator,
+				description,
+				A2($elm$random$Random$weighted, x, xs));
+		}
+	});
+var $elm$random$Random$int = F2(
+	function (a, b) {
+		return function (seed0) {
+			var _v0 = (_Utils_cmp(a, b) < 0) ? _Utils_Tuple2(a, b) : _Utils_Tuple2(b, a);
+			var lo = _v0.a;
+			var hi = _v0.b;
+			var range = (hi - lo) + 1;
+			if (!((range - 1) & range)) {
+				return _Utils_Tuple2(
+					(((range - 1) & $elm$random$Random$peel(seed0)) >>> 0) + lo,
+					$elm$random$Random$next(seed0));
+			} else {
+				var threshhold = (((-range) >>> 0) % range) >>> 0;
+				var accountForBias = function (seed) {
+					accountForBias:
+					while (true) {
+						var x = $elm$random$Random$peel(seed);
+						var seedN = $elm$random$Random$next(seed);
+						if (_Utils_cmp(x, threshhold) < 0) {
+							var $temp$seed = seedN;
+							seed = $temp$seed;
+							continue accountForBias;
+						} else {
+							return _Utils_Tuple2((x % range) + lo, seedN);
+						}
+					}
+				};
+				return accountForBias(seed0);
+			}
+		};
+	});
+var $johnathanbostrom$elm_dice$Dice$dX = function (sides) {
+	return A2(
+		$elm$random$Random$map,
+		$johnathanbostrom$elm_dice$Dice$oneDieResult(
+			'D' + $elm$core$String$fromInt(sides)),
+		A2($elm$random$Random$int, 1, sides));
+};
+var $johnathanbostrom$elm_dice$Dice$toGenerator = function (dieType) {
+	switch (dieType.$) {
+		case 0:
+			return $johnathanbostrom$elm_dice$Dice$dX(4);
+		case 1:
+			return $johnathanbostrom$elm_dice$Dice$dX(6);
+		case 2:
+			return $johnathanbostrom$elm_dice$Dice$dX(8);
+		case 3:
+			return $johnathanbostrom$elm_dice$Dice$dX(10);
+		case 4:
+			return $johnathanbostrom$elm_dice$Dice$dX(12);
+		case 5:
+			return $johnathanbostrom$elm_dice$Dice$dX(20);
+		case 6:
+			return $johnathanbostrom$elm_dice$Dice$dX(100);
+		case 7:
+			var sides = dieType.a;
+			return $johnathanbostrom$elm_dice$Dice$dX(sides);
+		case 8:
+			var description = dieType.a;
+			var generator = dieType.b;
+			return A2($johnathanbostrom$elm_dice$Dice$dCompound, description, generator);
+		case 11:
+			var description = dieType.a;
+			var val = dieType.b;
+			return A2($johnathanbostrom$elm_dice$Dice$constant, description, val);
+		case 9:
+			var description = dieType.a;
+			var sides = dieType.b;
+			return A2($johnathanbostrom$elm_dice$Dice$dCustom, description, sides);
+		default:
+			var description = dieType.a;
+			var sides = dieType.b;
+			return A2($johnathanbostrom$elm_dice$Dice$dWeighted, description, sides);
+	}
+};
+var $johnathanbostrom$elm_dice$Dice$roll = F2(
+	function (numDice, dieType) {
+		return (numDice > 1) ? A2(
+			$elm$random$Random$map,
+			$johnathanbostrom$elm_dice$Dice$combineResults(
+				$elm$core$String$fromInt(numDice) + (' ' + $johnathanbostrom$elm_dice$Dice$dieName(dieType))),
+			A2(
+				$elm$random$Random$list,
+				numDice,
+				$johnathanbostrom$elm_dice$Dice$toGenerator(dieType))) : ((numDice <= 0) ? A2($johnathanbostrom$elm_dice$Dice$constant, 'No Dice', 0) : $johnathanbostrom$elm_dice$Dice$toGenerator(dieType));
+	});
+var $rundis$elm_bootstrap$Bootstrap$Alert$Shown = 0;
+var $rundis$elm_bootstrap$Bootstrap$Alert$shown = 0;
+var $elm$core$Maybe$withDefault = F2(
+	function (_default, maybe) {
+		if (!maybe.$) {
+			var value = maybe.a;
+			return value;
+		} else {
+			return _default;
+		}
+	});
+var $author$project$Page$Dice$update = F2(
+	function (msg, model) {
+		switch (msg.$) {
+			case 0:
+				var amount = msg.a;
+				return _Utils_Tuple2(
+					_Utils_update(
+						model,
+						{W: amount}),
+					$elm$core$Platform$Cmd$none);
+			case 1:
+				var faces = msg.a;
+				return _Utils_Tuple2(
+					_Utils_update(
+						model,
+						{aa: faces}),
+					$elm$core$Platform$Cmd$none);
+			case 2:
+				var faces = A2(
+					$elm$core$Maybe$withDefault,
+					20,
+					$elm$core$String$toInt(model.aa));
+				var amount = A2(
+					$elm$core$Maybe$withDefault,
+					1,
+					$elm$core$String$toInt(model.W));
+				var rollCmd = A2(
+					$elm$random$Random$generate,
+					$author$project$Page$Dice$GotRollResult,
+					A2(
+						$johnathanbostrom$elm_dice$Dice$roll,
+						amount,
+						$johnathanbostrom$elm_dice$Dice$DX(faces)));
+				return _Utils_Tuple2(model, rollCmd);
+			default:
+				var result = msg.a;
+				return _Utils_Tuple2(
+					_Utils_update(
+						model,
+						{
+							bD: $elm$core$Maybe$Just(result),
+							bE: $rundis$elm_bootstrap$Bootstrap$Alert$shown
+						}),
+					$elm$core$Platform$Cmd$none);
+		}
+	});
+var $author$project$Main$update = F2(
+	function (msg, model) {
+		switch (msg.$) {
+			case 0:
+				var urlRequest = msg.a;
+				if (!urlRequest.$) {
+					var url = urlRequest.a;
+					return _Utils_Tuple2(
+						model,
+						A2(
+							$elm$browser$Browser$Navigation$pushUrl,
+							model.b5,
+							$elm$url$Url$toString(url)));
+				} else {
+					var href = urlRequest.a;
+					return _Utils_Tuple2(
+						model,
+						$elm$browser$Browser$Navigation$load(href));
+				}
+			case 3:
+				var diceMsg = msg.a;
+				var _v2 = A2($author$project$Page$Dice$update, diceMsg, model.Z);
+				var diceModel = _v2.a;
+				var diceCmd = _v2.b;
+				return _Utils_Tuple2(
+					_Utils_update(
+						model,
+						{Z: diceModel}),
+					A2($elm$core$Platform$Cmd$map, $author$project$Main$DiceMsg, diceCmd));
+			case 2:
+				var state = msg.a;
+				return _Utils_Tuple2(
+					_Utils_update(
+						model,
+						{ak: state}),
+					$elm$core$Platform$Cmd$none);
+			default:
+				var url = msg.a;
+				return _Utils_Tuple2(
+					_Utils_update(
+						model,
+						{
+							bq: $author$project$Main$toPage(url),
+							cn: url
+						}),
+					$elm$core$Platform$Cmd$none);
+		}
+	});
 var $elm$json$Json$Encode$string = _Json_wrap;
 var $elm$html$Html$Attributes$stringProperty = F2(
 	function (key, string) {
@@ -6045,32 +7232,207 @@ var $elm$html$Html$Attributes$stringProperty = F2(
 			key,
 			$elm$json$Json$Encode$string(string));
 	});
+var $elm$html$Html$Attributes$class = $elm$html$Html$Attributes$stringProperty('className');
+var $elm$html$Html$div = _VirtualDom_node('div');
+var $elm$virtual_dom$VirtualDom$map = _VirtualDom_map;
+var $elm$html$Html$map = $elm$virtual_dom$VirtualDom$map;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$Brand = $elm$core$Basics$identity;
+var $elm$html$Html$a = _VirtualDom_node('a');
+var $rundis$elm_bootstrap$Bootstrap$Navbar$Config = $elm$core$Basics$identity;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$updateConfig = F2(
+	function (mapper, _v0) {
+		var conf = _v0;
+		return mapper(conf);
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$brand = F3(
+	function (attributes, children, config_) {
+		return A2(
+			$rundis$elm_bootstrap$Bootstrap$Navbar$updateConfig,
+			function (conf) {
+				return _Utils_update(
+					conf,
+					{
+						X: $elm$core$Maybe$Just(
+							A2(
+								$elm$html$Html$a,
+								_Utils_ap(
+									_List_fromArray(
+										[
+											$elm$html$Html$Attributes$class('navbar-brand')
+										]),
+									attributes),
+								children))
+					});
+			},
+			config_);
+	});
+var $rundis$elm_bootstrap$Bootstrap$Internal$Role$Light = 6;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$Light = 1;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$Roled = function (a) {
+	return {$: 0, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$General$Internal$XS = 0;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$config = function (toMsg) {
+	return {
+		X: $elm$core$Maybe$Nothing,
+		aT: _List_Nil,
+		dr: _List_Nil,
+		b9: {
+			aI: _List_Nil,
+			O: $elm$core$Maybe$Nothing,
+			a4: false,
+			bH: $elm$core$Maybe$Just(
+				{
+					aK: $rundis$elm_bootstrap$Bootstrap$Navbar$Roled(6),
+					a9: 1
+				}),
+			ap: 0
+		},
+		cm: toMsg,
+		J: false
+	};
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$Dropdown = $elm$core$Basics$identity;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$NavDropdown = function (a) {
+	return {$: 1, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$dropdown = function (conf) {
+	return $rundis$elm_bootstrap$Bootstrap$Navbar$NavDropdown(conf);
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$DropdownItem = $elm$core$Basics$identity;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$dropdownItem = F2(
+	function (attributes, children) {
+		return A2(
+			$elm$html$Html$a,
+			_Utils_ap(
+				_List_fromArray(
+					[
+						$elm$html$Html$Attributes$class('dropdown-item')
+					]),
+				attributes),
+			children);
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$DropdownToggle = $elm$core$Basics$identity;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$dropdownToggle = F2(
+	function (attributes, children) {
+		return {aI: attributes, aP: children};
+	});
+var $capitalist$elm_octicons$Octicons$defaultOptions = {cu: $elm$core$Maybe$Nothing, aS: 'black', aX: 'evenodd', b1: 16, cJ: $elm$core$Maybe$Nothing, c$: $elm$core$Maybe$Nothing, co: 16};
 var $elm$html$Html$Attributes$href = function (url) {
 	return A2(
 		$elm$html$Html$Attributes$stringProperty,
 		'href',
 		_VirtualDom_noJavaScriptUri(url));
 };
-var $elm$html$Html$li = _VirtualDom_node('li');
-var $author$project$Main$externalLinkView = function (href) {
-	return A2(
-		$elm$html$Html$li,
-		_List_Nil,
-		_List_fromArray(
-			[
-				A2(
-				$elm$html$Html$a,
+var $capitalist$elm_octicons$Octicons$linkExternalPath = 'M11,10 L12,10 L12,13 C12,13.55 11.55,14 11,14 L1,14 C0.45,14 0,13.55 0,13 L0,3 C0,2.45 0.45,2 1,2 L4,2 L4,3 L1,3 L1,13 L11,13 L11,10 L11,10 Z M6,2 L8.25,4.25 L5,7.5 L6.5,9 L9.75,5.75 L12,8 L12,2 L6,2 L6,2 Z';
+var $elm$svg$Svg$Attributes$d = _VirtualDom_attribute('d');
+var $elm$svg$Svg$Attributes$fill = _VirtualDom_attribute('fill');
+var $elm$svg$Svg$Attributes$fillRule = _VirtualDom_attribute('fill-rule');
+var $elm$svg$Svg$Attributes$class = _VirtualDom_attribute('class');
+var $elm$svg$Svg$Attributes$height = _VirtualDom_attribute('height');
+var $elm$svg$Svg$Attributes$style = _VirtualDom_attribute('style');
+var $elm$svg$Svg$trustedNode = _VirtualDom_nodeNS('http://www.w3.org/2000/svg');
+var $elm$svg$Svg$svg = $elm$svg$Svg$trustedNode('svg');
+var $elm$svg$Svg$Attributes$version = _VirtualDom_attribute('version');
+var $elm$svg$Svg$Attributes$viewBox = _VirtualDom_attribute('viewBox');
+var $elm$svg$Svg$Attributes$width = _VirtualDom_attribute('width');
+var $capitalist$elm_octicons$Octicons$Internal$iconSVG = F5(
+	function (viewBox, name, options, attributes, children) {
+		var style = function () {
+			var _v2 = options.c$;
+			if (_v2.$ === 1) {
+				return _List_Nil;
+			} else {
+				var s = _v2.a;
+				return _List_fromArray(
+					[s]);
+			}
+		}();
+		var margin = function () {
+			var _v1 = options.cJ;
+			if (_v1.$ === 1) {
+				return _List_Nil;
+			} else {
+				var m = _v1.a;
+				return _List_fromArray(
+					['margin: ' + m]);
+			}
+		}();
+		var styles = function () {
+			var _v0 = $elm$core$List$concat(
+				_List_fromArray(
+					[style, margin]));
+			if (!_v0.b) {
+				return _List_Nil;
+			} else {
+				var lst = _v0;
+				return _List_fromArray(
+					[
+						$elm$svg$Svg$Attributes$style(
+						A2($elm$core$String$join, ';', lst))
+					]);
+			}
+		}();
+		return A2(
+			$elm$svg$Svg$svg,
+			$elm$core$List$concat(
 				_List_fromArray(
 					[
-						$elm$html$Html$Attributes$href(href)
-					]),
-				_List_fromArray(
-					[
-						$elm$html$Html$text(href)
-					]))
-			]));
-};
-var $elm$html$Html$hr = _VirtualDom_node('hr');
+						_List_fromArray(
+						[
+							$elm$svg$Svg$Attributes$version('1.1'),
+							$elm$svg$Svg$Attributes$class(
+							A2($elm$core$Maybe$withDefault, 'octicon ' + name, options.cu)),
+							$elm$svg$Svg$Attributes$width(
+							$elm$core$String$fromInt(options.co)),
+							$elm$svg$Svg$Attributes$height(
+							$elm$core$String$fromInt(options.b1)),
+							$elm$svg$Svg$Attributes$viewBox(viewBox)
+						]),
+						attributes,
+						styles
+					])),
+			children);
+	});
+var $elm$svg$Svg$path = $elm$svg$Svg$trustedNode('path');
+var $capitalist$elm_octicons$Octicons$pathIconWithOptions = F4(
+	function (path, viewBox, octiconName, options) {
+		return A5(
+			$capitalist$elm_octicons$Octicons$Internal$iconSVG,
+			viewBox,
+			octiconName,
+			options,
+			_List_Nil,
+			_List_fromArray(
+				[
+					A2(
+					$elm$svg$Svg$path,
+					_List_fromArray(
+						[
+							$elm$svg$Svg$Attributes$d(path),
+							$elm$svg$Svg$Attributes$fillRule(options.aX),
+							$elm$svg$Svg$Attributes$fill(options.aS)
+						]),
+					_List_Nil)
+				]));
+	});
+var $capitalist$elm_octicons$Octicons$linkExternal = A3($capitalist$elm_octicons$Octicons$pathIconWithOptions, $capitalist$elm_octicons$Octicons$linkExternalPath, '0 0 12 16', 'linkExternal');
+var $elm$virtual_dom$VirtualDom$text = _VirtualDom_text;
+var $elm$html$Html$text = $elm$virtual_dom$VirtualDom$text;
+var $author$project$Main$externalLink = F3(
+	function (linkConstructor, label, href) {
+		return A2(
+			linkConstructor,
+			_List_fromArray(
+				[
+					$elm$html$Html$Attributes$href(href)
+				]),
+			_List_fromArray(
+				[
+					$capitalist$elm_octicons$Octicons$linkExternal($capitalist$elm_octicons$Octicons$defaultOptions),
+					$elm$html$Html$text(' ' + label)
+				]));
+	});
 var $elm$url$Url$Builder$toQueryPair = function (_v0) {
 	var key = _v0.a;
 	var value = _v0.b;
@@ -6090,86 +7452,1735 @@ var $elm$url$Url$Builder$absolute = F2(
 	function (pathSegments, parameters) {
 		return '/' + (A2($elm$core$String$join, '/', pathSegments) + $elm$url$Url$Builder$toQuery(parameters));
 	});
-var $author$project$Main$internalLinkView = function (path) {
+var $author$project$Main$internalLink = F3(
+	function (linkConstructor, label, path) {
+		return A2(
+			linkConstructor,
+			_List_fromArray(
+				[
+					$elm$html$Html$Attributes$href(
+					A2(
+						$elm$url$Url$Builder$absolute,
+						_List_fromArray(
+							[
+								$author$project$Base$base,
+								A2($elm$core$String$dropLeft, 1, path)
+							]),
+						_List_Nil))
+				]),
+			_List_fromArray(
+				[
+					$elm$html$Html$text(label)
+				]));
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$Item = function (a) {
+	return {$: 0, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$itemLink = F2(
+	function (attributes, children) {
+		return $rundis$elm_bootstrap$Bootstrap$Navbar$Item(
+			{aI: attributes, aP: children});
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$items = F2(
+	function (items_, config_) {
+		return A2(
+			$rundis$elm_bootstrap$Bootstrap$Navbar$updateConfig,
+			function (conf) {
+				return _Utils_update(
+					conf,
+					{dr: items_});
+			},
+			config_);
+	});
+var $author$project$Main$uncurry = F2(
+	function (f, _v0) {
+		var a = _v0.a;
+		var b = _v0.b;
+		return A2(f, a, b);
+	});
+var $elm$html$Html$button = _VirtualDom_node('button');
+var $elm$core$Maybe$map = F2(
+	function (f, maybe) {
+		if (!maybe.$) {
+			var value = maybe.a;
+			return $elm$core$Maybe$Just(
+				f(value));
+		} else {
+			return $elm$core$Maybe$Nothing;
+		}
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$maybeBrand = function (brand_) {
+	if (!brand_.$) {
+		var b = brand_.a;
+		return _List_fromArray(
+			[b]);
+	} else {
+		return _List_Nil;
+	}
+};
+var $elm$core$Basics$not = _Basics_not;
+var $elm$virtual_dom$VirtualDom$Normal = function (a) {
+	return {$: 0, a: a};
+};
+var $elm$virtual_dom$VirtualDom$on = _VirtualDom_on;
+var $elm$html$Html$Events$on = F2(
+	function (event, decoder) {
+		return A2(
+			$elm$virtual_dom$VirtualDom$on,
+			event,
+			$elm$virtual_dom$VirtualDom$Normal(decoder));
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$sizeToComparable = function (size) {
+	switch (size) {
+		case 0:
+			return 1;
+		case 1:
+			return 2;
+		case 2:
+			return 3;
+		case 3:
+			return 4;
+		default:
+			return 5;
+	}
+};
+var $rundis$elm_bootstrap$Bootstrap$General$Internal$LG = 3;
+var $rundis$elm_bootstrap$Bootstrap$General$Internal$MD = 2;
+var $rundis$elm_bootstrap$Bootstrap$General$Internal$SM = 1;
+var $rundis$elm_bootstrap$Bootstrap$General$Internal$XL = 4;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$toScreenSize = function (windowWidth) {
+	return (windowWidth <= 576) ? 0 : ((windowWidth <= 768) ? 1 : ((windowWidth <= 992) ? 2 : ((windowWidth <= 1200) ? 3 : 4)));
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$shouldHideMenu = F2(
+	function (_v0, _v1) {
+		var windowWidth = _v0.ax;
+		var options = _v1.b9;
+		var winMedia = function () {
+			if (!windowWidth.$) {
+				var s = windowWidth.a;
+				return $rundis$elm_bootstrap$Bootstrap$Navbar$toScreenSize(s);
+			} else {
+				return 0;
+			}
+		}();
+		return _Utils_cmp(
+			$rundis$elm_bootstrap$Bootstrap$Navbar$sizeToComparable(winMedia),
+			$rundis$elm_bootstrap$Bootstrap$Navbar$sizeToComparable(options.ap)) > 0;
+	});
+var $elm$virtual_dom$VirtualDom$style = _VirtualDom_style;
+var $elm$html$Html$Attributes$style = $elm$virtual_dom$VirtualDom$style;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$Shown = 5;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$StartDown = 1;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$StartUp = 3;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$visibilityTransition = F2(
+	function (withAnimation_, visibility) {
+		var _v0 = _Utils_Tuple2(withAnimation_, visibility);
+		if (_v0.a) {
+			switch (_v0.b) {
+				case 0:
+					var _v1 = _v0.b;
+					return 1;
+				case 1:
+					var _v2 = _v0.b;
+					return 2;
+				case 2:
+					var _v3 = _v0.b;
+					return 5;
+				case 5:
+					var _v4 = _v0.b;
+					return 3;
+				case 3:
+					var _v5 = _v0.b;
+					return 4;
+				default:
+					var _v6 = _v0.b;
+					return 0;
+			}
+		} else {
+			switch (_v0.b) {
+				case 0:
+					var _v7 = _v0.b;
+					return 5;
+				case 5:
+					var _v8 = _v0.b;
+					return 0;
+				default:
+					return 0;
+			}
+		}
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$transitionHandler = F2(
+	function (state, configRec) {
+		return $elm$json$Json$Decode$succeed(
+			configRec.cm(
+				A2(
+					$rundis$elm_bootstrap$Bootstrap$Navbar$mapState,
+					function (s) {
+						return _Utils_update(
+							s,
+							{
+								f: A2($rundis$elm_bootstrap$Bootstrap$Navbar$visibilityTransition, configRec.J, s.f)
+							});
+					},
+					state)));
+	});
+var $elm$core$String$fromFloat = _String_fromNumber;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$transitionStyle = function (maybeHeight) {
+	var pixelHeight = A2(
+		$elm$core$Maybe$withDefault,
+		'0',
+		A2(
+			$elm$core$Maybe$map,
+			function (v) {
+				return $elm$core$String$fromFloat(v) + 'px';
+			},
+			maybeHeight));
+	return _List_fromArray(
+		[
+			A2($elm$html$Html$Attributes$style, 'position', 'relative'),
+			A2($elm$html$Html$Attributes$style, 'height', pixelHeight),
+			A2($elm$html$Html$Attributes$style, 'width', '100%'),
+			A2($elm$html$Html$Attributes$style, 'overflow', 'hidden'),
+			A2($elm$html$Html$Attributes$style, '-webkit-transition-timing-function', 'ease'),
+			A2($elm$html$Html$Attributes$style, '-o-transition-timing-function', 'ease'),
+			A2($elm$html$Html$Attributes$style, 'transition-timing-function', 'ease'),
+			A2($elm$html$Html$Attributes$style, '-webkit-transition-duration', '0.35s'),
+			A2($elm$html$Html$Attributes$style, '-o-transition-duration', '0.35s'),
+			A2($elm$html$Html$Attributes$style, 'transition-duration', '0.35s'),
+			A2($elm$html$Html$Attributes$style, '-webkit-transition-property', 'height'),
+			A2($elm$html$Html$Attributes$style, '-o-transition-property', 'height'),
+			A2($elm$html$Html$Attributes$style, 'transition-property', 'height')
+		]);
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$menuAttributes = F2(
+	function (state, configRec) {
+		var visibility = state.f;
+		var height = state.b1;
+		var defaults = _List_fromArray(
+			[
+				$elm$html$Html$Attributes$class('collapse navbar-collapse')
+			]);
+		switch (visibility) {
+			case 0:
+				if (height.$ === 1) {
+					return ((!configRec.J) || A2($rundis$elm_bootstrap$Bootstrap$Navbar$shouldHideMenu, state, configRec)) ? defaults : _List_fromArray(
+						[
+							A2($elm$html$Html$Attributes$style, 'display', 'block'),
+							A2($elm$html$Html$Attributes$style, 'height', '0'),
+							A2($elm$html$Html$Attributes$style, 'overflow', 'hidden'),
+							A2($elm$html$Html$Attributes$style, 'width', '100%')
+						]);
+				} else {
+					return defaults;
+				}
+			case 1:
+				return $rundis$elm_bootstrap$Bootstrap$Navbar$transitionStyle($elm$core$Maybe$Nothing);
+			case 2:
+				return _Utils_ap(
+					$rundis$elm_bootstrap$Bootstrap$Navbar$transitionStyle(height),
+					_List_fromArray(
+						[
+							A2(
+							$elm$html$Html$Events$on,
+							'transitionend',
+							A2($rundis$elm_bootstrap$Bootstrap$Navbar$transitionHandler, state, configRec))
+						]));
+			case 4:
+				return _Utils_ap(
+					$rundis$elm_bootstrap$Bootstrap$Navbar$transitionStyle($elm$core$Maybe$Nothing),
+					_List_fromArray(
+						[
+							A2(
+							$elm$html$Html$Events$on,
+							'transitionend',
+							A2($rundis$elm_bootstrap$Bootstrap$Navbar$transitionHandler, state, configRec))
+						]));
+			case 3:
+				return $rundis$elm_bootstrap$Bootstrap$Navbar$transitionStyle(height);
+			default:
+				return _Utils_ap(
+					defaults,
+					_List_fromArray(
+						[
+							$elm$html$Html$Attributes$class('show')
+						]));
+		}
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$menuWrapperAttributes = F2(
+	function (state, confRec) {
+		var visibility = state.f;
+		var height = state.b1;
+		var styleBlock = _List_fromArray(
+			[
+				A2($elm$html$Html$Attributes$style, 'display', 'block'),
+				A2($elm$html$Html$Attributes$style, 'width', '100%')
+			]);
+		var display = function () {
+			if (height.$ === 1) {
+				return ((!confRec.J) || A2($rundis$elm_bootstrap$Bootstrap$Navbar$shouldHideMenu, state, confRec)) ? 'flex' : 'block';
+			} else {
+				return 'flex';
+			}
+		}();
+		switch (visibility) {
+			case 0:
+				return _List_fromArray(
+					[
+						A2($elm$html$Html$Attributes$style, 'display', display),
+						A2($elm$html$Html$Attributes$style, 'width', '100%')
+					]);
+			case 1:
+				return styleBlock;
+			case 2:
+				return styleBlock;
+			case 4:
+				return styleBlock;
+			case 3:
+				return styleBlock;
+			default:
+				return ((!confRec.J) || A2($rundis$elm_bootstrap$Bootstrap$Navbar$shouldHideMenu, state, confRec)) ? _List_fromArray(
+					[
+						$elm$html$Html$Attributes$class('collapse navbar-collapse show')
+					]) : _List_fromArray(
+					[
+						A2($elm$html$Html$Attributes$style, 'display', 'block')
+					]);
+		}
+	});
+var $elm$html$Html$nav = _VirtualDom_node('nav');
+var $elm$core$List$filter = F2(
+	function (isGood, list) {
+		return A3(
+			$elm$core$List$foldr,
+			F2(
+				function (x, xs) {
+					return isGood(x) ? A2($elm$core$List$cons, x, xs) : xs;
+				}),
+			_List_Nil,
+			list);
+	});
+var $elm$core$Tuple$second = function (_v0) {
+	var y = _v0.b;
+	return y;
+};
+var $elm$html$Html$Attributes$classList = function (classes) {
+	return $elm$html$Html$Attributes$class(
+		A2(
+			$elm$core$String$join,
+			' ',
+			A2(
+				$elm$core$List$map,
+				$elm$core$Tuple$first,
+				A2($elm$core$List$filter, $elm$core$Tuple$second, classes))));
+};
+var $rundis$elm_bootstrap$Bootstrap$General$Internal$screenSizeOption = function (size) {
+	switch (size) {
+		case 0:
+			return $elm$core$Maybe$Nothing;
+		case 1:
+			return $elm$core$Maybe$Just('sm');
+		case 2:
+			return $elm$core$Maybe$Just('md');
+		case 3:
+			return $elm$core$Maybe$Just('lg');
+		default:
+			return $elm$core$Maybe$Just('xl');
+	}
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$expandOption = function (size) {
+	var toClass = function (sz) {
+		return $elm$html$Html$Attributes$class(
+			'navbar-expand' + A2(
+				$elm$core$Maybe$withDefault,
+				'',
+				A2(
+					$elm$core$Maybe$map,
+					function (s) {
+						return '-' + s;
+					},
+					$rundis$elm_bootstrap$Bootstrap$General$Internal$screenSizeOption(sz))));
+	};
+	switch (size) {
+		case 0:
+			return _List_fromArray(
+				[
+					toClass(1)
+				]);
+		case 1:
+			return _List_fromArray(
+				[
+					toClass(2)
+				]);
+		case 2:
+			return _List_fromArray(
+				[
+					toClass(3)
+				]);
+		case 3:
+			return _List_fromArray(
+				[
+					toClass(4)
+				]);
+		default:
+			return _List_Nil;
+	}
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$fixOption = function (fix) {
+	if (!fix) {
+		return 'fixed-top';
+	} else {
+		return 'fixed-bottom';
+	}
+};
+var $rundis$elm_bootstrap$Bootstrap$Internal$Role$toClass = F2(
+	function (prefix, role) {
+		return $elm$html$Html$Attributes$class(
+			prefix + ('-' + function () {
+				switch (role) {
+					case 0:
+						return 'primary';
+					case 1:
+						return 'secondary';
+					case 2:
+						return 'success';
+					case 3:
+						return 'info';
+					case 4:
+						return 'warning';
+					case 5:
+						return 'danger';
+					case 6:
+						return 'light';
+					default:
+						return 'dark';
+				}
+			}()));
+	});
+var $elm$core$String$concat = function (strings) {
+	return A2($elm$core$String$join, '', strings);
+};
+var $elm$core$Basics$round = _Basics_round;
+var $avh4$elm_color$Color$toCssString = function (_v0) {
+	var r = _v0.a;
+	var g = _v0.b;
+	var b = _v0.c;
+	var a = _v0.d;
+	var roundTo = function (x) {
+		return $elm$core$Basics$round(x * 1000) / 1000;
+	};
+	var pct = function (x) {
+		return $elm$core$Basics$round(x * 10000) / 100;
+	};
+	return $elm$core$String$concat(
+		_List_fromArray(
+			[
+				'rgba(',
+				$elm$core$String$fromFloat(
+				pct(r)),
+				'%,',
+				$elm$core$String$fromFloat(
+				pct(g)),
+				'%,',
+				$elm$core$String$fromFloat(
+				pct(b)),
+				'%,',
+				$elm$core$String$fromFloat(
+				roundTo(a)),
+				')'
+			]));
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$backgroundColorOption = function (bgClass) {
+	switch (bgClass.$) {
+		case 0:
+			var role = bgClass.a;
+			return A2($rundis$elm_bootstrap$Bootstrap$Internal$Role$toClass, 'bg', role);
+		case 1:
+			var color = bgClass.a;
+			return A2(
+				$elm$html$Html$Attributes$style,
+				'background-color',
+				$avh4$elm_color$Color$toCssString(color));
+		default:
+			var classString = bgClass.a;
+			return $elm$html$Html$Attributes$class(classString);
+	}
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$linkModifierClass = function (modifier) {
+	return $elm$html$Html$Attributes$class(
+		function () {
+			if (!modifier) {
+				return 'navbar-dark';
+			} else {
+				return 'navbar-light';
+			}
+		}());
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$schemeAttributes = function (_v0) {
+	var modifier = _v0.a9;
+	var bgColor = _v0.aK;
+	return _List_fromArray(
+		[
+			$rundis$elm_bootstrap$Bootstrap$Navbar$linkModifierClass(modifier),
+			$rundis$elm_bootstrap$Bootstrap$Navbar$backgroundColorOption(bgColor)
+		]);
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$navbarAttributes = function (options) {
+	return _Utils_ap(
+		_List_fromArray(
+			[
+				$elm$html$Html$Attributes$classList(
+				_List_fromArray(
+					[
+						_Utils_Tuple2('navbar', true),
+						_Utils_Tuple2('container', options.a4)
+					]))
+			]),
+		_Utils_ap(
+			$rundis$elm_bootstrap$Bootstrap$Navbar$expandOption(options.ap),
+			_Utils_ap(
+				function () {
+					var _v0 = options.bH;
+					if (!_v0.$) {
+						var scheme_ = _v0.a;
+						return $rundis$elm_bootstrap$Bootstrap$Navbar$schemeAttributes(scheme_);
+					} else {
+						return _List_Nil;
+					}
+				}(),
+				_Utils_ap(
+					function () {
+						var _v1 = options.O;
+						if (!_v1.$) {
+							var fix = _v1.a;
+							return _List_fromArray(
+								[
+									$elm$html$Html$Attributes$class(
+									$rundis$elm_bootstrap$Bootstrap$Navbar$fixOption(fix))
+								]);
+						} else {
+							return _List_Nil;
+						}
+					}(),
+					options.aI))));
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$renderCustom = function (items_) {
+	return A2(
+		$elm$core$List$map,
+		function (_v0) {
+			var item = _v0;
+			return item;
+		},
+		items_);
+};
+var $rundis$elm_bootstrap$Bootstrap$Navbar$getOrInitDropdownStatus = F2(
+	function (id, _v0) {
+		var dropdowns = _v0.C;
+		return A2(
+			$elm$core$Maybe$withDefault,
+			2,
+			A2($elm$core$Dict$get, id, dropdowns));
+	});
+var $elm$html$Html$li = _VirtualDom_node('li');
+var $elm$core$Basics$neq = _Utils_notEqual;
+var $elm$virtual_dom$VirtualDom$Custom = function (a) {
+	return {$: 3, a: a};
+};
+var $elm$html$Html$Events$custom = F2(
+	function (event, decoder) {
+		return A2(
+			$elm$virtual_dom$VirtualDom$on,
+			event,
+			$elm$virtual_dom$VirtualDom$Custom(decoder));
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$toggleOpen = F3(
+	function (state, id, _v0) {
+		var toMsg = _v0.cm;
+		var currStatus = A2($rundis$elm_bootstrap$Bootstrap$Navbar$getOrInitDropdownStatus, id, state);
+		var newStatus = function () {
+			switch (currStatus) {
+				case 0:
+					return 2;
+				case 1:
+					return 2;
+				default:
+					return 0;
+			}
+		}();
+		return toMsg(
+			A2(
+				$rundis$elm_bootstrap$Bootstrap$Navbar$mapState,
+				function (s) {
+					return _Utils_update(
+						s,
+						{
+							C: A3($elm$core$Dict$insert, id, newStatus, s.C)
+						});
+				},
+				state));
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$renderDropdownToggle = F4(
+	function (state, id, configRec, _v0) {
+		var attributes = _v0.aI;
+		var children = _v0.aP;
+		return A2(
+			$elm$html$Html$a,
+			_Utils_ap(
+				_List_fromArray(
+					[
+						$elm$html$Html$Attributes$class('nav-link dropdown-toggle'),
+						$elm$html$Html$Attributes$href('#'),
+						A2(
+						$elm$html$Html$Events$custom,
+						'click',
+						$elm$json$Json$Decode$succeed(
+							{
+								w: A3($rundis$elm_bootstrap$Bootstrap$Navbar$toggleOpen, state, id, configRec),
+								cd: true,
+								cj: false
+							}))
+					]),
+				attributes),
+			children);
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$renderDropdown = F3(
+	function (state, configRec, _v0) {
+		var ddRec = _v0;
+		var needsDropup = A2(
+			$elm$core$Maybe$withDefault,
+			false,
+			A2(
+				$elm$core$Maybe$map,
+				function (fix) {
+					if (fix === 1) {
+						return true;
+					} else {
+						return false;
+					}
+				},
+				configRec.b9.O));
+		var isShown = A2($rundis$elm_bootstrap$Bootstrap$Navbar$getOrInitDropdownStatus, ddRec.$7, state) !== 2;
+		return A2(
+			$elm$html$Html$li,
+			_List_fromArray(
+				[
+					$elm$html$Html$Attributes$classList(
+					_List_fromArray(
+						[
+							_Utils_Tuple2('nav-item', true),
+							_Utils_Tuple2('dropdown', true),
+							_Utils_Tuple2('shown', isShown),
+							_Utils_Tuple2('dropup', needsDropup)
+						]))
+				]),
+			_List_fromArray(
+				[
+					A4($rundis$elm_bootstrap$Bootstrap$Navbar$renderDropdownToggle, state, ddRec.$7, configRec, ddRec.dB),
+					A2(
+					$elm$html$Html$div,
+					_List_fromArray(
+						[
+							$elm$html$Html$Attributes$classList(
+							_List_fromArray(
+								[
+									_Utils_Tuple2('dropdown-menu', true),
+									_Utils_Tuple2('show', isShown)
+								]))
+						]),
+					A2(
+						$elm$core$List$map,
+						function (_v1) {
+							var item = _v1;
+							return item;
+						},
+						ddRec.dr))
+				]));
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$renderItemLink = function (_v0) {
+	var attributes = _v0.aI;
+	var children = _v0.aP;
 	return A2(
 		$elm$html$Html$li,
-		_List_Nil,
+		_List_fromArray(
+			[
+				$elm$html$Html$Attributes$class('nav-item')
+			]),
 		_List_fromArray(
 			[
 				A2(
 				$elm$html$Html$a,
-				_List_fromArray(
-					[
-						$elm$html$Html$Attributes$href(
-						A2(
-							$elm$url$Url$Builder$absolute,
-							_List_fromArray(
-								[
-									$author$project$Base$base,
-									A2($elm$core$String$dropLeft, 1, path)
-								]),
-							_List_Nil))
-					]),
-				_List_fromArray(
-					[
-						$elm$html$Html$text(path)
-					]))
+				_Utils_ap(
+					_List_fromArray(
+						[
+							$elm$html$Html$Attributes$class('nav-link')
+						]),
+					attributes),
+				children)
 			]));
 };
 var $elm$html$Html$ul = _VirtualDom_node('ul');
-var $author$project$Page$About$view = $elm$html$Html$text('About view');
-var $author$project$Page$Home$view = $elm$html$Html$text('Home view');
+var $rundis$elm_bootstrap$Bootstrap$Navbar$renderNav = F3(
+	function (state, configRec, navItems) {
+		return A2(
+			$elm$html$Html$ul,
+			_List_fromArray(
+				[
+					$elm$html$Html$Attributes$class('navbar-nav mr-auto')
+				]),
+			A2(
+				$elm$core$List$map,
+				function (item) {
+					if (!item.$) {
+						var item_ = item.a;
+						return $rundis$elm_bootstrap$Bootstrap$Navbar$renderItemLink(item_);
+					} else {
+						var dropdown_ = item.a;
+						return A3($rundis$elm_bootstrap$Bootstrap$Navbar$renderDropdown, state, configRec, dropdown_);
+					}
+				},
+				navItems));
+	});
+var $elm$html$Html$span = _VirtualDom_node('span');
+var $elm$json$Json$Decode$andThen = _Json_andThen;
+var $elm$json$Json$Decode$at = F2(
+	function (fields, decoder) {
+		return A3($elm$core$List$foldr, $elm$json$Json$Decode$field, decoder, fields);
+	});
+var $elm$json$Json$Decode$decodeValue = _Json_run;
+var $elm$json$Json$Decode$fail = _Json_fail;
+var $elm$json$Json$Decode$float = _Json_decodeFloat;
+var $elm$json$Json$Decode$oneOf = _Json_oneOf;
+var $rundis$elm_bootstrap$Bootstrap$Utilities$DomHelper$parentElement = function (decoder) {
+	return A2($elm$json$Json$Decode$field, 'parentElement', decoder);
+};
+var $elm$json$Json$Decode$string = _Json_decodeString;
+var $rundis$elm_bootstrap$Bootstrap$Utilities$DomHelper$target = function (decoder) {
+	return A2($elm$json$Json$Decode$field, 'target', decoder);
+};
+var $elm$json$Json$Decode$value = _Json_decodeValue;
+var $rundis$elm_bootstrap$Bootstrap$Navbar$heightDecoder = function () {
+	var tagDecoder = A3(
+		$elm$json$Json$Decode$map2,
+		F2(
+			function (tag, val) {
+				return _Utils_Tuple2(tag, val);
+			}),
+		A2($elm$json$Json$Decode$field, 'tagName', $elm$json$Json$Decode$string),
+		$elm$json$Json$Decode$value);
+	var resToDec = function (res) {
+		if (!res.$) {
+			var v = res.a;
+			return $elm$json$Json$Decode$succeed(v);
+		} else {
+			var err = res.a;
+			return $elm$json$Json$Decode$fail(
+				$elm$json$Json$Decode$errorToString(err));
+		}
+	};
+	var fromNavDec = $elm$json$Json$Decode$oneOf(
+		_List_fromArray(
+			[
+				A2(
+				$elm$json$Json$Decode$at,
+				_List_fromArray(
+					['childNodes', '2', 'childNodes', '0', 'offsetHeight']),
+				$elm$json$Json$Decode$float),
+				A2(
+				$elm$json$Json$Decode$at,
+				_List_fromArray(
+					['childNodes', '1', 'childNodes', '0', 'offsetHeight']),
+				$elm$json$Json$Decode$float)
+			]));
+	var fromButtonDec = $rundis$elm_bootstrap$Bootstrap$Utilities$DomHelper$parentElement(fromNavDec);
+	return A2(
+		$elm$json$Json$Decode$andThen,
+		function (_v0) {
+			var tag = _v0.a;
+			var val = _v0.b;
+			switch (tag) {
+				case 'NAV':
+					return resToDec(
+						A2($elm$json$Json$Decode$decodeValue, fromNavDec, val));
+				case 'BUTTON':
+					return resToDec(
+						A2($elm$json$Json$Decode$decodeValue, fromButtonDec, val));
+				default:
+					return $elm$json$Json$Decode$succeed(0);
+			}
+		},
+		$rundis$elm_bootstrap$Bootstrap$Utilities$DomHelper$target(
+			$rundis$elm_bootstrap$Bootstrap$Utilities$DomHelper$parentElement(tagDecoder)));
+}();
+var $rundis$elm_bootstrap$Bootstrap$Navbar$toggleHandler = F2(
+	function (state, configRec) {
+		var height = state.b1;
+		var updState = function (h) {
+			return A2(
+				$rundis$elm_bootstrap$Bootstrap$Navbar$mapState,
+				function (s) {
+					return _Utils_update(
+						s,
+						{
+							b1: $elm$core$Maybe$Just(h),
+							f: A2($rundis$elm_bootstrap$Bootstrap$Navbar$visibilityTransition, configRec.J, s.f)
+						});
+				},
+				state);
+		};
+		return A2(
+			$elm$html$Html$Events$on,
+			'click',
+			A2(
+				$elm$json$Json$Decode$andThen,
+				function (v) {
+					return $elm$json$Json$Decode$succeed(
+						configRec.cm(
+							(v > 0) ? updState(v) : updState(
+								A2($elm$core$Maybe$withDefault, 0, height))));
+				},
+				$rundis$elm_bootstrap$Bootstrap$Navbar$heightDecoder));
+	});
+var $elm$html$Html$Attributes$type_ = $elm$html$Html$Attributes$stringProperty('type');
+var $rundis$elm_bootstrap$Bootstrap$Navbar$view = F2(
+	function (state, conf) {
+		var configRec = conf;
+		return A2(
+			$elm$html$Html$nav,
+			$rundis$elm_bootstrap$Bootstrap$Navbar$navbarAttributes(configRec.b9),
+			_Utils_ap(
+				$rundis$elm_bootstrap$Bootstrap$Navbar$maybeBrand(configRec.X),
+				_Utils_ap(
+					_List_fromArray(
+						[
+							A2(
+							$elm$html$Html$button,
+							_List_fromArray(
+								[
+									$elm$html$Html$Attributes$class(
+									'navbar-toggler' + A2(
+										$elm$core$Maybe$withDefault,
+										'',
+										A2(
+											$elm$core$Maybe$map,
+											function (_v0) {
+												return ' navbar-toggler-right';
+											},
+											configRec.X))),
+									$elm$html$Html$Attributes$type_('button'),
+									A2($rundis$elm_bootstrap$Bootstrap$Navbar$toggleHandler, state, configRec)
+								]),
+							_List_fromArray(
+								[
+									A2(
+									$elm$html$Html$span,
+									_List_fromArray(
+										[
+											$elm$html$Html$Attributes$class('navbar-toggler-icon')
+										]),
+									_List_Nil)
+								]))
+						]),
+					_List_fromArray(
+						[
+							A2(
+							$elm$html$Html$div,
+							A2($rundis$elm_bootstrap$Bootstrap$Navbar$menuAttributes, state, configRec),
+							_List_fromArray(
+								[
+									A2(
+									$elm$html$Html$div,
+									A2($rundis$elm_bootstrap$Bootstrap$Navbar$menuWrapperAttributes, state, configRec),
+									_Utils_ap(
+										_List_fromArray(
+											[
+												A3($rundis$elm_bootstrap$Bootstrap$Navbar$renderNav, state, configRec, configRec.dr)
+											]),
+										$rundis$elm_bootstrap$Bootstrap$Navbar$renderCustom(configRec.aT)))
+								]))
+						]))));
+	});
+var $rundis$elm_bootstrap$Bootstrap$Navbar$withAnimation = function (config_) {
+	return A2(
+		$rundis$elm_bootstrap$Bootstrap$Navbar$updateConfig,
+		function (conf) {
+			return _Utils_update(
+				conf,
+				{J: true});
+		},
+		config_);
+};
+var $author$project$Main$menu = function (model) {
+	return A2(
+		$rundis$elm_bootstrap$Bootstrap$Navbar$view,
+		model.ak,
+		A2(
+			$rundis$elm_bootstrap$Bootstrap$Navbar$items,
+			_List_fromArray(
+				[
+					$rundis$elm_bootstrap$Bootstrap$Navbar$dropdown(
+					{
+						$7: 'apps',
+						dr: A2(
+							$elm$core$List$map,
+							$author$project$Main$uncurry(
+								$author$project$Main$internalLink($rundis$elm_bootstrap$Bootstrap$Navbar$dropdownItem)),
+							_List_fromArray(
+								[
+									_Utils_Tuple2('Dice', '/dice')
+								])),
+						dB: A2(
+							$rundis$elm_bootstrap$Bootstrap$Navbar$dropdownToggle,
+							_List_Nil,
+							_List_fromArray(
+								[
+									$elm$html$Html$text('Apps')
+								]))
+					}),
+					A3($author$project$Main$externalLink, $rundis$elm_bootstrap$Bootstrap$Navbar$itemLink, 'Source', 'https://github.com/gipsond/elm-playground')
+				]),
+			A4(
+				$author$project$Main$internalLink,
+				$rundis$elm_bootstrap$Bootstrap$Navbar$brand,
+				'gipsond | Elm Playground',
+				'/',
+				$rundis$elm_bootstrap$Bootstrap$Navbar$withAnimation(
+					$rundis$elm_bootstrap$Bootstrap$Navbar$config($author$project$Main$NavMsg)))));
+};
+var $author$project$Main$notFoundView = $elm$html$Html$text('Not found');
+var $author$project$Page$Dice$Amount = function (a) {
+	return {$: 0, a: a};
+};
+var $author$project$Page$Dice$Faces = function (a) {
+	return {$: 1, a: a};
+};
+var $author$project$Page$Dice$Roll = {$: 2};
+var $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$Config = $elm$core$Basics$identity;
+var $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$mapOptions = F2(
+	function (mapper, _v0) {
+		var conf = _v0;
+		var options = conf.b9;
+		return _Utils_update(
+			conf,
+			{
+				b9: mapper(options)
+			});
+	});
+var $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$asGroup = $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$mapOptions(
+	function (opts) {
+		return _Utils_update(
+			opts,
+			{a5: true});
+	});
+var $rundis$elm_bootstrap$Bootstrap$Internal$Button$Attrs = function (a) {
+	return {$: 4, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$Button$attrs = function (attrs_) {
+	return $rundis$elm_bootstrap$Bootstrap$Internal$Button$Attrs(attrs_);
+};
+var $elm$core$Maybe$andThen = F2(
+	function (callback, maybeValue) {
+		if (!maybeValue.$) {
+			var value = maybeValue.a;
+			return callback(value);
+		} else {
+			return $elm$core$Maybe$Nothing;
+		}
+	});
+var $rundis$elm_bootstrap$Bootstrap$Internal$Button$applyModifier = F2(
+	function (modifier, options) {
+		switch (modifier.$) {
+			case 0:
+				var size = modifier.a;
+				return _Utils_update(
+					options,
+					{
+						bK: $elm$core$Maybe$Just(size)
+					});
+			case 1:
+				var coloring = modifier.a;
+				return _Utils_update(
+					options,
+					{
+						u: $elm$core$Maybe$Just(coloring)
+					});
+			case 2:
+				return _Utils_update(
+					options,
+					{aL: true});
+			case 3:
+				var val = modifier.a;
+				return _Utils_update(
+					options,
+					{aW: val});
+			default:
+				var attrs = modifier.a;
+				return _Utils_update(
+					options,
+					{
+						aI: _Utils_ap(options.aI, attrs)
+					});
+		}
+	});
+var $rundis$elm_bootstrap$Bootstrap$Internal$Button$defaultOptions = {aI: _List_Nil, aL: false, u: $elm$core$Maybe$Nothing, aW: false, bK: $elm$core$Maybe$Nothing};
+var $elm$json$Json$Encode$bool = _Json_wrap;
+var $elm$html$Html$Attributes$boolProperty = F2(
+	function (key, bool) {
+		return A2(
+			_VirtualDom_property,
+			key,
+			$elm$json$Json$Encode$bool(bool));
+	});
+var $elm$html$Html$Attributes$disabled = $elm$html$Html$Attributes$boolProperty('disabled');
+var $rundis$elm_bootstrap$Bootstrap$Internal$Button$roleClass = function (role) {
+	switch (role) {
+		case 0:
+			return 'primary';
+		case 1:
+			return 'secondary';
+		case 2:
+			return 'success';
+		case 3:
+			return 'info';
+		case 4:
+			return 'warning';
+		case 5:
+			return 'danger';
+		case 6:
+			return 'dark';
+		case 7:
+			return 'light';
+		default:
+			return 'link';
+	}
+};
+var $rundis$elm_bootstrap$Bootstrap$Internal$Button$buttonAttributes = function (modifiers) {
+	var options = A3($elm$core$List$foldl, $rundis$elm_bootstrap$Bootstrap$Internal$Button$applyModifier, $rundis$elm_bootstrap$Bootstrap$Internal$Button$defaultOptions, modifiers);
+	return _Utils_ap(
+		_List_fromArray(
+			[
+				$elm$html$Html$Attributes$classList(
+				_List_fromArray(
+					[
+						_Utils_Tuple2('btn', true),
+						_Utils_Tuple2('btn-block', options.aL),
+						_Utils_Tuple2('disabled', options.aW)
+					])),
+				$elm$html$Html$Attributes$disabled(options.aW)
+			]),
+		_Utils_ap(
+			function () {
+				var _v0 = A2($elm$core$Maybe$andThen, $rundis$elm_bootstrap$Bootstrap$General$Internal$screenSizeOption, options.bK);
+				if (!_v0.$) {
+					var s = _v0.a;
+					return _List_fromArray(
+						[
+							$elm$html$Html$Attributes$class('btn-' + s)
+						]);
+				} else {
+					return _List_Nil;
+				}
+			}(),
+			_Utils_ap(
+				function () {
+					var _v1 = options.u;
+					if (!_v1.$) {
+						if (!_v1.a.$) {
+							var role = _v1.a.a;
+							return _List_fromArray(
+								[
+									$elm$html$Html$Attributes$class(
+									'btn-' + $rundis$elm_bootstrap$Bootstrap$Internal$Button$roleClass(role))
+								]);
+						} else {
+							var role = _v1.a.a;
+							return _List_fromArray(
+								[
+									$elm$html$Html$Attributes$class(
+									'btn-outline-' + $rundis$elm_bootstrap$Bootstrap$Internal$Button$roleClass(role))
+								]);
+						}
+					} else {
+						return _List_Nil;
+					}
+				}(),
+				options.aI)));
+};
+var $rundis$elm_bootstrap$Bootstrap$Button$button = F2(
+	function (options, children) {
+		return A2(
+			$elm$html$Html$button,
+			$rundis$elm_bootstrap$Bootstrap$Internal$Button$buttonAttributes(options),
+			children);
+	});
+var $rundis$elm_bootstrap$Bootstrap$Alert$Config = $elm$core$Basics$identity;
+var $rundis$elm_bootstrap$Bootstrap$Alert$children = F2(
+	function (children_, _v0) {
+		var configRec = _v0;
+		return _Utils_update(
+			configRec,
+			{aP: children_});
+	});
+var $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$mapConfig = F2(
+	function (mapper, _v0) {
+		var configRec = _v0;
+		return mapper(configRec);
+	});
+var $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$children = function (children_) {
+	return $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$mapConfig(
+		function (conf) {
+			return _Utils_update(
+				conf,
+				{aP: children_});
+		});
+};
+var $rundis$elm_bootstrap$Bootstrap$Internal$Role$Secondary = 1;
+var $rundis$elm_bootstrap$Bootstrap$Alert$config = {aI: _List_Nil, aP: _List_Nil, B: $elm$core$Maybe$Nothing, bF: 1, f: 0, J: false};
+var $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$config = {
+	aP: _List_Nil,
+	a6: $elm$core$Maybe$Nothing,
+	b9: {aI: _List_Nil, aW: false, a5: false}
+};
+var $elm$html$Html$form = _VirtualDom_node('form');
+var $rundis$elm_bootstrap$Bootstrap$Form$form = F2(
+	function (attributes, children) {
+		return A2($elm$html$Html$form, attributes, children);
+	});
+var $elm$html$Html$h4 = _VirtualDom_node('h4');
+var $rundis$elm_bootstrap$Bootstrap$Alert$headingPrivate = F3(
+	function (elemFn, attributes, children_) {
+		return A2(
+			elemFn,
+			A2(
+				$elm$core$List$cons,
+				$elm$html$Html$Attributes$class('alert-header'),
+				attributes),
+			children_);
+	});
+var $rundis$elm_bootstrap$Bootstrap$Alert$h4 = F2(
+	function (attributes, children_) {
+		return A3($rundis$elm_bootstrap$Bootstrap$Alert$headingPrivate, $elm$html$Html$h4, attributes, children_);
+	});
+var $elm$html$Html$label = _VirtualDom_node('label');
+var $rundis$elm_bootstrap$Bootstrap$Form$label = F2(
+	function (attributes, children) {
+		return A2(
+			$elm$html$Html$label,
+			A2(
+				$elm$core$List$cons,
+				$elm$html$Html$Attributes$class('form-control-label'),
+				attributes),
+			children);
+	});
+var $elm$html$Html$legend = _VirtualDom_node('legend');
+var $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$legend = F2(
+	function (attributes, children_) {
+		return $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$mapConfig(
+			function (conf) {
+				return _Utils_update(
+					conf,
+					{
+						a6: $elm$core$Maybe$Just(
+							A2($elm$html$Html$legend, attributes, children_))
+					});
+			});
+	});
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$Number = 7;
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$Input = $elm$core$Basics$identity;
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$Type = function (a) {
+	return {$: 2, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$create = F2(
+	function (tipe, options) {
+		return {
+			b9: A2(
+				$elm$core$List$cons,
+				$rundis$elm_bootstrap$Bootstrap$Form$Input$Type(tipe),
+				options)
+		};
+	});
+var $elm$html$Html$input = _VirtualDom_node('input');
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$applyModifier = F2(
+	function (modifier, options) {
+		switch (modifier.$) {
+			case 0:
+				var size_ = modifier.a;
+				return _Utils_update(
+					options,
+					{
+						bK: $elm$core$Maybe$Just(size_)
+					});
+			case 1:
+				var id_ = modifier.a;
+				return _Utils_update(
+					options,
+					{
+						$7: $elm$core$Maybe$Just(id_)
+					});
+			case 2:
+				var tipe = modifier.a;
+				return _Utils_update(
+					options,
+					{ao: tipe});
+			case 3:
+				var val = modifier.a;
+				return _Utils_update(
+					options,
+					{aW: val});
+			case 4:
+				var value_ = modifier.a;
+				return _Utils_update(
+					options,
+					{
+						dD: $elm$core$Maybe$Just(value_)
+					});
+			case 7:
+				var value_ = modifier.a;
+				return _Utils_update(
+					options,
+					{
+						br: $elm$core$Maybe$Just(value_)
+					});
+			case 5:
+				var onInput_ = modifier.a;
+				return _Utils_update(
+					options,
+					{
+						bj: $elm$core$Maybe$Just(onInput_)
+					});
+			case 6:
+				var validation_ = modifier.a;
+				return _Utils_update(
+					options,
+					{
+						bV: $elm$core$Maybe$Just(validation_)
+					});
+			case 8:
+				var val = modifier.a;
+				return _Utils_update(
+					options,
+					{bC: val});
+			case 9:
+				var val = modifier.a;
+				return _Utils_update(
+					options,
+					{am: val});
+			default:
+				var attrs_ = modifier.a;
+				return _Utils_update(
+					options,
+					{
+						aI: _Utils_ap(options.aI, attrs_)
+					});
+		}
+	});
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$Text = 0;
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$defaultOptions = {aI: _List_Nil, aW: false, $7: $elm$core$Maybe$Nothing, bj: $elm$core$Maybe$Nothing, br: $elm$core$Maybe$Nothing, am: false, bC: false, bK: $elm$core$Maybe$Nothing, ao: 0, bV: $elm$core$Maybe$Nothing, dD: $elm$core$Maybe$Nothing};
+var $elm$html$Html$Attributes$id = $elm$html$Html$Attributes$stringProperty('id');
+var $elm$html$Html$Events$alwaysStop = function (x) {
+	return _Utils_Tuple2(x, true);
+};
+var $elm$virtual_dom$VirtualDom$MayStopPropagation = function (a) {
+	return {$: 1, a: a};
+};
+var $elm$html$Html$Events$stopPropagationOn = F2(
+	function (event, decoder) {
+		return A2(
+			$elm$virtual_dom$VirtualDom$on,
+			event,
+			$elm$virtual_dom$VirtualDom$MayStopPropagation(decoder));
+	});
+var $elm$html$Html$Events$targetValue = A2(
+	$elm$json$Json$Decode$at,
+	_List_fromArray(
+		['target', 'value']),
+	$elm$json$Json$Decode$string);
+var $elm$html$Html$Events$onInput = function (tagger) {
+	return A2(
+		$elm$html$Html$Events$stopPropagationOn,
+		'input',
+		A2(
+			$elm$json$Json$Decode$map,
+			$elm$html$Html$Events$alwaysStop,
+			A2($elm$json$Json$Decode$map, tagger, $elm$html$Html$Events$targetValue)));
+};
+var $elm$html$Html$Attributes$placeholder = $elm$html$Html$Attributes$stringProperty('placeholder');
+var $elm$html$Html$Attributes$readonly = $elm$html$Html$Attributes$boolProperty('readOnly');
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$sizeAttribute = function (size) {
+	return A2(
+		$elm$core$Maybe$map,
+		function (s) {
+			return $elm$html$Html$Attributes$class('form-control-' + s);
+		},
+		$rundis$elm_bootstrap$Bootstrap$General$Internal$screenSizeOption(size));
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$typeAttribute = function (inputType) {
+	return $elm$html$Html$Attributes$type_(
+		function () {
+			switch (inputType) {
+				case 0:
+					return 'text';
+				case 1:
+					return 'password';
+				case 2:
+					return 'datetime-local';
+				case 3:
+					return 'date';
+				case 4:
+					return 'month';
+				case 5:
+					return 'time';
+				case 6:
+					return 'week';
+				case 7:
+					return 'number';
+				case 8:
+					return 'email';
+				case 9:
+					return 'url';
+				case 10:
+					return 'search';
+				case 11:
+					return 'tel';
+				default:
+					return 'color';
+			}
+		}());
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$FormInternal$validationToString = function (validation) {
+	if (!validation) {
+		return 'is-valid';
+	} else {
+		return 'is-invalid';
+	}
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$validationAttribute = function (validation) {
+	return $elm$html$Html$Attributes$class(
+		$rundis$elm_bootstrap$Bootstrap$Form$FormInternal$validationToString(validation));
+};
+var $elm$html$Html$Attributes$value = $elm$html$Html$Attributes$stringProperty('value');
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$toAttributes = function (modifiers) {
+	var options = A3($elm$core$List$foldl, $rundis$elm_bootstrap$Bootstrap$Form$Input$applyModifier, $rundis$elm_bootstrap$Bootstrap$Form$Input$defaultOptions, modifiers);
+	return _Utils_ap(
+		_List_fromArray(
+			[
+				$elm$html$Html$Attributes$class(
+				options.am ? 'form-control-plaintext' : 'form-control'),
+				$elm$html$Html$Attributes$disabled(options.aW),
+				$elm$html$Html$Attributes$readonly(options.bC || options.am),
+				$rundis$elm_bootstrap$Bootstrap$Form$Input$typeAttribute(options.ao)
+			]),
+		_Utils_ap(
+			A2(
+				$elm$core$List$filterMap,
+				$elm$core$Basics$identity,
+				_List_fromArray(
+					[
+						A2($elm$core$Maybe$map, $elm$html$Html$Attributes$id, options.$7),
+						A2($elm$core$Maybe$andThen, $rundis$elm_bootstrap$Bootstrap$Form$Input$sizeAttribute, options.bK),
+						A2($elm$core$Maybe$map, $elm$html$Html$Attributes$value, options.dD),
+						A2($elm$core$Maybe$map, $elm$html$Html$Attributes$placeholder, options.br),
+						A2($elm$core$Maybe$map, $elm$html$Html$Events$onInput, options.bj),
+						A2($elm$core$Maybe$map, $rundis$elm_bootstrap$Bootstrap$Form$Input$validationAttribute, options.bV)
+					])),
+			options.aI));
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$view = function (_v0) {
+	var options = _v0.b9;
+	return A2(
+		$elm$html$Html$input,
+		$rundis$elm_bootstrap$Bootstrap$Form$Input$toAttributes(options),
+		_List_Nil);
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$input = F2(
+	function (tipe, options) {
+		return $rundis$elm_bootstrap$Bootstrap$Form$Input$view(
+			A2($rundis$elm_bootstrap$Bootstrap$Form$Input$create, tipe, options));
+	});
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$number = $rundis$elm_bootstrap$Bootstrap$Form$Input$input(7);
+var $elm$virtual_dom$VirtualDom$MayPreventDefault = function (a) {
+	return {$: 2, a: a};
+};
+var $elm$html$Html$Events$preventDefaultOn = F2(
+	function (event, decoder) {
+		return A2(
+			$elm$virtual_dom$VirtualDom$on,
+			event,
+			$elm$virtual_dom$VirtualDom$MayPreventDefault(decoder));
+	});
+var $rundis$elm_bootstrap$Bootstrap$Button$onClick = function (message) {
+	return $rundis$elm_bootstrap$Bootstrap$Button$attrs(
+		_List_fromArray(
+			[
+				A2(
+				$elm$html$Html$Events$preventDefaultOn,
+				'click',
+				$elm$json$Json$Decode$succeed(
+					_Utils_Tuple2(message, true)))
+			]));
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$OnInput = function (a) {
+	return {$: 5, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$onInput = function (toMsg) {
+	return $rundis$elm_bootstrap$Bootstrap$Form$Input$OnInput(toMsg);
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$Placeholder = function (a) {
+	return {$: 7, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$placeholder = function (value_) {
+	return $rundis$elm_bootstrap$Bootstrap$Form$Input$Placeholder(value_);
+};
+var $rundis$elm_bootstrap$Bootstrap$Internal$Button$Coloring = function (a) {
+	return {$: 1, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$Internal$Button$Primary = 0;
+var $rundis$elm_bootstrap$Bootstrap$Internal$Button$Roled = function (a) {
+	return {$: 0, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$Button$primary = $rundis$elm_bootstrap$Bootstrap$Internal$Button$Coloring(
+	$rundis$elm_bootstrap$Bootstrap$Internal$Button$Roled(0));
+var $rundis$elm_bootstrap$Bootstrap$Internal$Role$Success = 2;
+var $rundis$elm_bootstrap$Bootstrap$Alert$role = F2(
+	function (role_, _v0) {
+		var configRec = _v0;
+		return _Utils_update(
+			configRec,
+			{bF: role_});
+	});
+var $rundis$elm_bootstrap$Bootstrap$Alert$success = function (conf) {
+	return A2($rundis$elm_bootstrap$Bootstrap$Alert$role, 2, conf);
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$Value = function (a) {
+	return {$: 4, a: a};
+};
+var $rundis$elm_bootstrap$Bootstrap$Form$Input$value = function (value_) {
+	return $rundis$elm_bootstrap$Bootstrap$Form$Input$Value(value_);
+};
+var $elm$virtual_dom$VirtualDom$attribute = F2(
+	function (key, value) {
+		return A2(
+			_VirtualDom_attribute,
+			_VirtualDom_noOnOrFormAction(key),
+			_VirtualDom_noJavaScriptOrHtmlUri(value));
+	});
+var $elm$html$Html$Attributes$attribute = $elm$virtual_dom$VirtualDom$attribute;
+var $rundis$elm_bootstrap$Bootstrap$Alert$StartClose = 1;
+var $elm$html$Html$Events$onClick = function (msg) {
+	return A2(
+		$elm$html$Html$Events$on,
+		'click',
+		$elm$json$Json$Decode$succeed(msg));
+};
+var $rundis$elm_bootstrap$Bootstrap$Alert$clickHandler = F2(
+	function (visibility, configRec) {
+		var handleClick = F2(
+			function (viz, toMsg) {
+				return $elm$html$Html$Events$onClick(
+					toMsg(viz));
+			});
+		var _v0 = configRec.B;
+		if (!_v0.$) {
+			var dismissMsg = _v0.a;
+			return _List_fromArray(
+				[
+					configRec.J ? A2(handleClick, 1, dismissMsg) : A2(handleClick, 3, dismissMsg)
+				]);
+		} else {
+			return _List_Nil;
+		}
+	});
+var $rundis$elm_bootstrap$Bootstrap$Alert$injectButton = F2(
+	function (btn, children_) {
+		if (children_.b) {
+			var head = children_.a;
+			var tail = children_.b;
+			return A2(
+				$elm$core$List$cons,
+				head,
+				A2($elm$core$List$cons, btn, tail));
+		} else {
+			return _List_fromArray(
+				[btn]);
+		}
+	});
+var $rundis$elm_bootstrap$Bootstrap$Alert$isDismissable = function (configRec) {
+	var _v0 = configRec.B;
+	if (!_v0.$) {
+		return true;
+	} else {
+		return false;
+	}
+};
+var $rundis$elm_bootstrap$Bootstrap$Alert$maybeAddDismissButton = F3(
+	function (visibilty, configRec, children_) {
+		return $rundis$elm_bootstrap$Bootstrap$Alert$isDismissable(configRec) ? A2(
+			$rundis$elm_bootstrap$Bootstrap$Alert$injectButton,
+			A2(
+				$elm$html$Html$button,
+				_Utils_ap(
+					_List_fromArray(
+						[
+							$elm$html$Html$Attributes$type_('button'),
+							$elm$html$Html$Attributes$class('close'),
+							A2($elm$html$Html$Attributes$attribute, 'aria-label', 'close')
+						]),
+					A2($rundis$elm_bootstrap$Bootstrap$Alert$clickHandler, visibilty, configRec)),
+				_List_fromArray(
+					[
+						A2(
+						$elm$html$Html$span,
+						_List_fromArray(
+							[
+								A2($elm$html$Html$Attributes$attribute, 'aria-hidden', 'true')
+							]),
+						_List_fromArray(
+							[
+								$elm$html$Html$text('×')
+							]))
+					])),
+			children_) : children_;
+	});
+var $rundis$elm_bootstrap$Bootstrap$Alert$viewAttributes = F2(
+	function (visibility, configRec) {
+		var visibiltyAttributes = (visibility === 3) ? _List_fromArray(
+			[
+				A2($elm$html$Html$Attributes$style, 'display', 'none')
+			]) : _List_Nil;
+		var animationAttributes = function () {
+			if (configRec.J) {
+				var _v0 = configRec.B;
+				if (!_v0.$) {
+					var dismissMsg = _v0.a;
+					return _List_fromArray(
+						[
+							A2(
+							$elm$html$Html$Events$on,
+							'transitionend',
+							$elm$json$Json$Decode$succeed(
+								dismissMsg(3)))
+						]);
+				} else {
+					return _List_Nil;
+				}
+			} else {
+				return _List_Nil;
+			}
+		}();
+		var alertAttributes = _List_fromArray(
+			[
+				A2($elm$html$Html$Attributes$attribute, 'role', 'alert'),
+				$elm$html$Html$Attributes$classList(
+				_List_fromArray(
+					[
+						_Utils_Tuple2('alert', true),
+						_Utils_Tuple2(
+						'alert-dismissible',
+						$rundis$elm_bootstrap$Bootstrap$Alert$isDismissable(configRec)),
+						_Utils_Tuple2('fade', configRec.J),
+						_Utils_Tuple2('show', !visibility)
+					])),
+				A2($rundis$elm_bootstrap$Bootstrap$Internal$Role$toClass, 'alert', configRec.bF)
+			]);
+		return $elm$core$List$concat(
+			_List_fromArray(
+				[configRec.aI, alertAttributes, visibiltyAttributes, animationAttributes]));
+	});
+var $rundis$elm_bootstrap$Bootstrap$Alert$view = F2(
+	function (visibility, _v0) {
+		var configRec = _v0;
+		return A2(
+			$elm$html$Html$div,
+			A2($rundis$elm_bootstrap$Bootstrap$Alert$viewAttributes, visibility, configRec),
+			A3($rundis$elm_bootstrap$Bootstrap$Alert$maybeAddDismissButton, visibility, configRec, configRec.aP));
+	});
+var $elm$html$Html$fieldset = _VirtualDom_node('fieldset');
+var $rundis$elm_bootstrap$Bootstrap$Form$Fieldset$view = function (_v0) {
+	var rec = _v0;
+	var options = rec.b9;
+	return A2(
+		$elm$html$Html$fieldset,
+		_Utils_ap(
+			_List_fromArray(
+				[
+					$elm$html$Html$Attributes$classList(
+					_List_fromArray(
+						[
+							_Utils_Tuple2('form-group', options.a5)
+						])),
+					$elm$html$Html$Attributes$disabled(options.aW)
+				]),
+			options.aI),
+		function (xs) {
+			return A2($elm$core$List$append, xs, rec.aP);
+		}(
+			A2(
+				$elm$core$Maybe$withDefault,
+				_List_Nil,
+				A2(
+					$elm$core$Maybe$map,
+					function (e) {
+						return _List_fromArray(
+							[e]);
+					},
+					rec.a6))));
+};
+var $author$project$Page$Dice$view = function (model) {
+	return A2(
+		$elm$html$Html$div,
+		_List_Nil,
+		_List_fromArray(
+			[
+				A2(
+				$rundis$elm_bootstrap$Bootstrap$Form$form,
+				_List_Nil,
+				_List_fromArray(
+					[
+						$rundis$elm_bootstrap$Bootstrap$Form$Fieldset$view(
+						A2(
+							$rundis$elm_bootstrap$Bootstrap$Form$Fieldset$children,
+							_List_fromArray(
+								[
+									$rundis$elm_bootstrap$Bootstrap$Form$Fieldset$view(
+									A2(
+										$rundis$elm_bootstrap$Bootstrap$Form$Fieldset$children,
+										_List_fromArray(
+											[
+												A2(
+												$rundis$elm_bootstrap$Bootstrap$Form$label,
+												_List_Nil,
+												_List_fromArray(
+													[
+														$elm$html$Html$text('Number of dice')
+													])),
+												$rundis$elm_bootstrap$Bootstrap$Form$Input$number(
+												_List_fromArray(
+													[
+														$rundis$elm_bootstrap$Bootstrap$Form$Input$placeholder('X'),
+														$rundis$elm_bootstrap$Bootstrap$Form$Input$value(model.W),
+														$rundis$elm_bootstrap$Bootstrap$Form$Input$onInput($author$project$Page$Dice$Amount)
+													]))
+											]),
+										$rundis$elm_bootstrap$Bootstrap$Form$Fieldset$asGroup($rundis$elm_bootstrap$Bootstrap$Form$Fieldset$config))),
+									$rundis$elm_bootstrap$Bootstrap$Form$Fieldset$view(
+									A2(
+										$rundis$elm_bootstrap$Bootstrap$Form$Fieldset$children,
+										_List_fromArray(
+											[
+												A2(
+												$rundis$elm_bootstrap$Bootstrap$Form$label,
+												_List_Nil,
+												_List_fromArray(
+													[
+														$elm$html$Html$text('Number of faces')
+													])),
+												$rundis$elm_bootstrap$Bootstrap$Form$Input$number(
+												_List_fromArray(
+													[
+														$rundis$elm_bootstrap$Bootstrap$Form$Input$placeholder('Y'),
+														$rundis$elm_bootstrap$Bootstrap$Form$Input$value(model.aa),
+														$rundis$elm_bootstrap$Bootstrap$Form$Input$onInput($author$project$Page$Dice$Faces)
+													]))
+											]),
+										$rundis$elm_bootstrap$Bootstrap$Form$Fieldset$asGroup($rundis$elm_bootstrap$Bootstrap$Form$Fieldset$config)))
+								]),
+							A3(
+								$rundis$elm_bootstrap$Bootstrap$Form$Fieldset$legend,
+								_List_Nil,
+								_List_fromArray(
+									[
+										$elm$html$Html$text('Roll XDY')
+									]),
+								$rundis$elm_bootstrap$Bootstrap$Form$Fieldset$config))),
+						A2(
+						$rundis$elm_bootstrap$Bootstrap$Button$button,
+						_List_fromArray(
+							[
+								$rundis$elm_bootstrap$Bootstrap$Button$primary,
+								$rundis$elm_bootstrap$Bootstrap$Button$attrs(
+								_List_fromArray(
+									[
+										$elm$html$Html$Attributes$type_('button')
+									])),
+								$rundis$elm_bootstrap$Bootstrap$Button$onClick($author$project$Page$Dice$Roll)
+							]),
+						_List_fromArray(
+							[
+								$elm$html$Html$text('Roll')
+							]))
+					])),
+				A2(
+				$elm$html$Html$div,
+				_List_Nil,
+				_List_fromArray(
+					[
+						A2(
+						$rundis$elm_bootstrap$Bootstrap$Alert$view,
+						model.bE,
+						A2(
+							$rundis$elm_bootstrap$Bootstrap$Alert$children,
+							_List_fromArray(
+								[
+									A2(
+									$rundis$elm_bootstrap$Bootstrap$Alert$h4,
+									_List_Nil,
+									_List_fromArray(
+										[
+											$elm$html$Html$text('Result')
+										])),
+									$elm$html$Html$text(
+									function () {
+										var _v0 = model.bD;
+										if (_v0.$ === 1) {
+											return 'None';
+										} else {
+											var result = _v0.a;
+											return result.dh + (': ' + $elm$core$String$fromInt(result.dD));
+										}
+									}())
+								]),
+							$rundis$elm_bootstrap$Bootstrap$Alert$success($rundis$elm_bootstrap$Bootstrap$Alert$config)))
+					]))
+			]));
+};
+var $author$project$Page$Home$view = $elm$html$Html$text('Welcome! Select an app from the dropdown menu to get started.');
 var $author$project$Main$view = function (model) {
 	return {
-		am: _List_fromArray(
+		dd: _List_fromArray(
 			[
-				$elm$html$Html$text('The current URL is: '),
 				A2(
-				$elm$html$Html$b,
+				$elm$html$Html$div,
 				_List_Nil,
 				_List_fromArray(
 					[
-						$elm$html$Html$text(
-						$elm$url$Url$toString(model.F))
-					])),
-				A2(
-				$elm$html$Html$ul,
-				_List_Nil,
-				_List_fromArray(
-					[
-						$author$project$Main$internalLinkView('/'),
-						$author$project$Main$internalLinkView('/about'),
-						$author$project$Main$internalLinkView('/blog/0'),
-						$author$project$Main$internalLinkView('/blog/1'),
-						$author$project$Main$internalLinkView('/blog/2')
-					])),
-				A2(
-				$elm$html$Html$ul,
-				_List_Nil,
-				_List_fromArray(
-					[
-						$author$project$Main$externalLinkView('https://github.com/gipsond/elm-playground')
-					])),
-				A2($elm$html$Html$hr, _List_Nil, _List_Nil),
-				function () {
-				var _v0 = model.E;
-				switch (_v0.$) {
-					case 0:
-						return $author$project$Page$Home$view;
-					case 1:
-						return $author$project$Page$About$view;
-					case 2:
-						var number = _v0.a;
-						return $author$project$Main$blogView(number);
-					default:
-						return $author$project$Main$notFoundView;
-				}
-			}()
+						$author$project$Main$menu(model),
+						A2(
+						$elm$html$Html$div,
+						_List_fromArray(
+							[
+								$elm$html$Html$Attributes$class('container')
+							]),
+						_List_fromArray(
+							[
+								function () {
+								var _v0 = model.bq;
+								switch (_v0) {
+									case 0:
+										return $author$project$Page$Home$view;
+									case 1:
+										return A2(
+											$elm$html$Html$map,
+											$author$project$Main$DiceMsg,
+											$author$project$Page$Dice$view(model.Z));
+									default:
+										return $author$project$Main$notFoundView;
+								}
+							}()
+							]))
+					]))
 			]),
-		az: 'gipsond | elm-playground'
+		dA: 'gipsond | elm-playground'
 	};
 };
 var $author$project$Main$main = $elm$browser$Browser$application(
-	{as: $author$project$Main$init, au: $author$project$Main$UrlChanged, av: $author$project$Main$LinkClicked, ay: $author$project$Main$subscriptions, aA: $author$project$Main$update, aB: $author$project$Main$view});
+	{dq: $author$project$Main$init, du: $author$project$Main$UrlChanged, dv: $author$project$Main$LinkClicked, dz: $author$project$Main$subscriptions, dC: $author$project$Main$update, dE: $author$project$Main$view});
 _Platform_export({'Main':{'init':$author$project$Main$main(
 	$elm$json$Json$Decode$succeed(0))(0)}});}(this));
